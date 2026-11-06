@@ -1,0 +1,48 @@
+{
+ "id": "info_summary",
+ "name": "정보 요약형 (핵심 N가지)",
+ "status": "available",
+ "desc": "번호를 매긴 팁·정보를 한 장에 하나씩 정리",
+ "fit": "마음 돌봄 팁, 체크 포인트처럼 나열할 항목이 여러 개인 원고",
+ "template": "【주제 한 줄 — 예: 잠 못 드는 밤, 작은 습관 4가지】\n1. 【첫 번째 항목과 한 줄 설명】\n2. 【두 번째 항목과 한 줄 설명】\n3. 【세 번째 항목과 한 줄 설명】\n4. 【네 번째 항목과 한 줄 설명】",
+ "tips": [
+  "항목은 3~5개가 보기 좋습니다",
+  "항목마다 '무엇 + 어떻게'를 한 줄로",
+  "제목에 개수를 넣으면 표지가 '핵심 N가지'로 나옵니다"
+ ],
+ "count": {
+  "min": 4,
+  "max": 8,
+  "default": 6
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "개수를 넣은 질문형 또는 제안형 제목"
+  },
+  {
+   "archetype": "numbered",
+   "repeat": true,
+   "hint": "항목 하나씩(badge 01, 02 …)"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover(제목에 개수를 명시), 항목마다 numbered 카드(badge에 01, 02 …), 마지막 call_to_action",
+ "fit_check": {
+  "need_any": [
+   "1.",
+   "2.",
+   "첫째",
+   "둘째",
+   "가지"
+  ],
+  "min_hits": 1
+ },
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 6
+ }
+}

@@ -1,0 +1,52 @@
+{
+ "id": "howto",
+ "name": "단계별 안내형 (상담·신청 절차)",
+ "status": "available",
+ "desc": "절차를 Step 1, 2, 3 순서로 안내",
+ "fit": "상담 예약·진행 절차, 프로그램 신청 방법 안내",
+ "template": "【안내 제목 한 줄 — 예: 상담은 이렇게 진행돼요】\n1단계: 【…】\n2단계: 【…】\n3단계: 【…】\n문의: 【전화·네이버 예약】",
+ "tips": [
+  "단계는 3~5개",
+  "비용·회기·할인은 회사 팩트에 있는 것만 쓰세요"
+ ],
+ "count": {
+  "min": 3,
+  "max": 6,
+  "default": 4
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "절차를 알려 주는 제목"
+  },
+  {
+   "archetype": "steps",
+   "hint": "전체 절차 요약(번호 단계)"
+  },
+  {
+   "archetype": "body",
+   "repeat": true,
+   "hint": "단계별 자세한 설명"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover, steps 카드 1장(전체 단계 3~5개 요약), 필요하면 단계별 body, 마지막 call_to_action. 가격·회기·할인은 [브랜드 팩트]에 있는 그대로만 쓰고 없으면 쓰지 말 것",
+ "fit_check": {
+  "need_any": [
+   "1단계",
+   "2단계",
+   "절차",
+   "순서",
+   "먼저",
+   "다음"
+  ],
+  "min_hits": 1
+ },
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 5
+ }
+}

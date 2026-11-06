@@ -1,0 +1,1524 @@
+"""The one content pipeline: source material -> 4-channel OSMU output.
+
+OSMU_admin had two near-identical pipelines (news_scraper.run_newsjacking_pipeline
+and manual_content_writer.run_manual_content_pipeline) that differed only in
+where the seed text came from and whether a source-link footer was appended.
+They're one function here, with `source_type` selecting those two differences.
+
+Runs **synchronously in the desktop app's process** (on a background thread
+started by the workbench view), which is the main structural change from the
+original architecture. The async Supabase queue + `worker_runner.py` polling
+loop existed to route around Vercel's 10-second serverless timeout; with the
+UI and the engine in the same Python process there is no timeout to route
+around, and a queue whose producer and consumer are the same process is pure
+overhead. `progress` is a callback so the caller can show which stage is
+running instead of the marketer staring at a spinner for 90 seconds.
+
+Stage order, and why:
+  1. caption photos      — cached/batched (ai_workers/vision.py)
+  2. draft the body      — the only call that sees memo + article + captions
+  3. compliance guardrail— rewrites, so it must run before density checks
+  4. SEO rebalance       — verifies what stage 2 was merely *instructed* to do
+  5. dictionary re-sweep — stages 3~4 are fresh LLM output; re-run the cheap
+                           deterministic substitution over them
+  6. image-tag backstops — nothing may silently drop an attached photo
+  7. secondary channels  — Instagram / Shorts / Naver tags, best-effort
+"""
+from __future__ import annotations
+
+import re
+import contextvars
+import functools
+from concurrent.futures import ThreadPoolExecutor
+from typing import Callable, Dict, List, Optional
+
+from ai_workers import body_variety, content_mode, formatting
+from ai_workers.guardrail import (
+    apply_blacklist_dictionary,
+    apply_guardrail_if_enabled,
+    check_certification_scope,
+    filter_certification_hashtags,
+    remove_certification_overclaims,
+)
+from ai_workers.instagram_caption_writer import write_instagram_caption
+from ai_workers.multi_llm_router import generate_text, get_configured_vendor, text_slot
+from ai_workers.naver_hashtag_writer import write_naver_hashtags
+from ai_workers.news_scraper import scrape_article
+from ai_workers.photo_placement import (
+    caption_attachments,
+    ensure_all_photos_tagged,
+    ensure_image_tags_preserved,
+    strip_unresolvable_image_tags,
+)
+from ai_workers.prompt_builder import (
+    SUBJECT_INSTRUCTION,
+    build_blog_system_prompt,
+    notice_block,
+    photo_context,
+    photo_instruction,
+    recent_posts_block,
+)
+from ai_workers import factsheet
+from ai_workers import search_intent
+from ai_workers.proofreader import proofread
+from ai_workers.seo_optimizer import (
+    TITLE_IDEAL_MAX,
+    TITLE_IDEAL_MIN,
+    check_keyword_density,
+    rebalance_keywords,
+    rewrite_title_for_keyword,
+    select_target_keywords,
+    title_candidates,
+    title_keyword_coverage,
+)
+from ai_workers.shorts_writer import write_shorts_script
+from ai_workers.sns_validator import (
+    validate_instagram,
+    validate_naver_tags,
+    validate_shorts,
+)
+from ai_workers.title_variety import (
+    SIMILARITY_THRESHOLD,
+    avoidance_instruction,
+    closest_previous,
+    rewrite_for_variety,
+)
+from core import repo
+
+def _title_generation_instruction(seo_keywords: List[str], source_title: str = "") -> str:
+    """Asks the LLM to draft the title alongside the body in the same call
+    (see module docstring on why title+body aren't split across two calls).
+    When SEO keywords are configured, the instruction front-loads keyword
+    inclusion here — cheaper than fixing it after the fact — and
+    `rewrite_title_for_keyword` below is the verify/correct backstop for
+    when the model ignores it anyway.
+
+    Only a keyword that fits the post's subject: "include at least one" made
+    the model pick an unrelated pool keyword for the title (가발 관리 메모에
+    창업 교육 키워드) and then steer the body toward it. The backstop already
+    leaves such a post alone — it only enforces keywords the draft itself
+    used (see select_target_keywords)."""
+    keyword_line = ""
+    if seo_keywords:
+        keyword_line = (
+            f" 다음 타깃 키워드 중 이 글의 소재와 실제로 맞는 것이 있으면 1개를 제목에 자연스럽게 "
+            f"포함하세요: {', '.join(seo_keywords)}. 소재와 맞는 키워드가 없으면 억지로 넣지 말고 "
+            "소재에 맞는 제목을 지으세요 — 관련 없는 키워드를 넣으면 글이 다른 주제로 흘러갑니다."
+        )
+    if source_title:
+        # Newsjacking: the value is the brand's angle on the news, not the
+        # news itself. Naver pools blog and news for duplicate detection, so
+        # echoing the publisher's headline gets the post dropped in favour of
+        # the original — and a reader searching that headline wants the
+        # article, not a product post.
+        keyword_line += (
+            f"\n원본 기사 제목은 «{source_title}» 입니다. 이 제목을 그대로 쓰거나 살짝 바꿔 "
+            "쓰지 마세요 — 네이버는 블로그와 뉴스를 같은 유사문서 판정 대상으로 보기 때문에 "
+            "기사 제목을 따라 쓰면 원본 기사에 밀려 검색에서 제외됩니다. "
+            "뉴스의 핵심 소재나 수치는 가져오되, 제목은 '우리 브랜드가 이 뉴스를 어떻게 "
+            "해석했는가'가 드러나도록 새로 지으세요."
+        )
+    return (
+        "\n\n[제목 자동 생성 안내] 담당자가 제목을 입력하지 않았습니다. 본문보다 먼저, 첫 줄에 "
+        # Same band the title scorer rewards (seo_optimizer.TITLE_IDEAL_MIN/MAX):
+        # this used to cap at 25, below the scorer's sweet spot, so a 26~30자
+        # title could only ever come out of the corrective rewrite pass.
+        "정확히 `[TITLE: 생성한 제목]` 형식으로 이 포스트에 어울리는 제목을 "
+        f"**{TITLE_IDEAL_MIN}~{TITLE_IDEAL_MAX}자로** 출력한 "
+        "뒤, 줄바꿈하고 그 다음부터 본문을 이어서 작성하세요. 부제목이나 설명을 덧붙이지 말고 "
+        f"제목 하나만 짧게 쓰세요.{keyword_line}"
+    )
+
+# 이 아래면 '검색해서 들어온 사람이 답을 못 찾는 글'로 봅니다. 절반은 임의의
+# 선이지만, 노출을 목표로 하는 글에서 기대 항목의 절반도 답하지 못한다면 그건
+# 체류시간으로 드러나고 순위로 돌아옵니다 — _recommendation 참고.
+INTENT_COVERAGE_FLOOR = 50
+
+_TITLE_MARKER_RE = re.compile(r"^\s*\[TITLE:\s*(.+?)\]\s*\n+", re.IGNORECASE)
+
+Progress = Optional[Callable[[str], None]]
+
+
+def _extract_generated_title(draft: str):
+    """Pulls a leading `[TITLE: ...]` marker off the draft, if present.
+    Returns (title_or_None, remaining_draft)."""
+    match = _TITLE_MARKER_RE.match(draft)
+    if not match:
+        return None, draft
+    return match.group(1).strip(), draft[match.end():]
+
+
+def _recommendation(report: Dict) -> Dict:
+    """A deterministic verdict from fields the pipeline already computed —
+    not another LLM call — so the marketer gets an instant, reproducible
+    answer to "should I regenerate this?" instead of having to read every
+    sub-section of the report and weigh it themselves."""
+    reasons = []
+    if report.get("audit_failed"):
+        # Not "N건의 이슈": nothing was found — nothing was *checked*. Saying
+        # so plainly keeps the marketer from hunting for a violation that
+        # isn't there, and from shipping on the assumption there is none.
+        reasons.append("컴플라이언스 검수를 완료하지 못함 — 검수만 다시 실행 필요")
+    elif report.get("compliance_pass") is False:
+        reasons.append(f"컴플라이언스 미해결 이슈 {len(report.get('llm_issues') or [])}건")
+
+    density = report.get("seo_density") or {}
+    conflicts = report.get("seo_conflicts") or []
+    # In '내용 우선' the density numbers are reported for information only —
+    # the marketer chose not to enforce them, so being under the floor is the
+    # requested outcome, not a defect to regenerate over.
+    if density.get("enforced") is not False:
+        # Missing keywords the guardrail stripped are excluded here: another
+        # run can't satisfy them, so listing them as a reason to regenerate
+        # would send the marketer into a loop.
+        fixable_missing = [kw for kw in density.get("missing") or [] if kw not in conflicts]
+        if fixable_missing:
+            reasons.append(f"SEO 키워드 부족: {', '.join(fixable_missing)}")
+        if density.get("overused"):
+            reasons.append(f"SEO 키워드 과다: {', '.join(density['overused'])}")
+
+    # No target at all is not a failure of this draft — it means the post's
+    # subject has no matching keyword in the brand pool (see
+    # select_target_keywords). Regenerating cannot fix that; adding a keyword
+    # for that line of business can, so it routes to 'settings'.
+    #
+    # Not reported in '내용 우선': that mode never shows the model the pool,
+    # so an empty target list is the mode working as asked, not a gap in the
+    # keyword list.
+    no_targets = (
+        report.get("seo_targets") == []
+        and bool(report.get("seo_pool"))
+        and report.get("content_mode") != "rich"
+    )
+
+    # 검색 의도 미충족은 이 글의 결함이 아니라 입력의 공백입니다. 답례품을
+    # 검색한 사람은 가격·최소수량·제작기간·주문 방법을 확인하러 오는데, 메모에
+    # 그 숫자가 없으면 어떤 모델도 쓸 수 없습니다. 첫 측정에서 돌답례품 글이
+    # 충족도 0%로 나왔고, 그 여섯 가지가 전부 비어 있었습니다.
+    #
+    # **다시 생성하라고 하지 않습니다.** 재생성으로는 없는 가격이 생기지 않고,
+    # 그렇게 안내하면 컴플라이언스 오탐이 만들었던 것과 같은 무한 루프가 됩니다.
+    # 채워야 할 입력으로 안내하는 것이 정확한 처방입니다.
+    #
+    # 노출이 목표라서 더 중요합니다 — 네이버 DIA는 체류시간을 보고, 검색해서
+    # 들어온 사람이 답을 못 찾고 나가면 그 신호가 순위를 도로 깎습니다.
+    # 순수 공지 글(공지 정보는 채웠는데 제품 정보는 안 채운 글)에서는 이 경고를
+    # 아예 띄우지 않습니다. 강사과정 공지 글이 SEO 타깃으로 '굿즈제작'을 물고
+    # 들어가면, 검색 의도 감사는 '이 글이 최소 제작 수량·단가·배송 기간에
+    # 답하는가'를 묻고 0%를 냈다 — 강사과정 공지에는 애초에 해당하지 않는
+    # 질문이다. 게다가 안내 문구는 그 항목을 🛍️ 제품·주문 정보에 채우라고
+    # 하는데, 공지 글에 제품 판매 정보를 채우라는 건 맥락에 안 맞는 지시다.
+    # 근본 원인(교육 키워드가 SEO 풀에 없어서 무관한 키워드가 타깃이 되는 것)은
+    # 풀 재구성으로 풀어야 하고, 여기서는 그 결과로 나온 오해의 소지가 있는
+    # 경고만 막는다.
+    is_pure_notice = bool((report.get("notice") or {}).get("checked")) and not bool(
+        (report.get("product") or {}).get("checked")
+    )
+    intent = report.get("search_intent") or {}
+    intent_coverage = intent.get("coverage")
+    intent_gap = bool(
+        intent.get("checked")
+        and intent_coverage is not None
+        and intent_coverage < INTENT_COVERAGE_FLOOR
+        and not is_pure_notice
+    )
+    fact_gaps = []
+    for key, label in (("notice", "공지 정보"), ("product", "제품·주문 정보")):
+        section = report.get(key) or {}
+        if section.get("checked") and section.get("missing_labels"):
+            fact_gaps.append(f"{label}: {', '.join(section['missing_labels'])}")
+
+    # 최근 글과 본문이 겹치는 것도 재생성 사유가 아니라 입력의 공백입니다 — 같은
+    # 메모로 다시 만들면 같은 글이 나옵니다. 이 제품만의 디테일을 메모에 채우라는
+    # 안내로 보냅니다 (검색 의도 미충족과 같은 이유).
+    variety = report.get("body_variety") or {}
+    body_similar = bool(variety.get("similar_to"))
+
+    # 목표보다 한참 짧은 글도 같은 처방입니다. 분량을 채울 재료(제품 설명)가
+    # 메모에 없으면 다시 생성해도 같은 길이이거나, 브랜드 소개로 채워집니다.
+    length = report.get("length") or {}
+    too_short = bool(length.get("short"))
+
+    if reasons:
+        verdict = "regenerate"
+    elif conflicts or no_targets or intent_gap or fact_gaps or body_similar or too_short:
+        verdict = "settings"
+    else:
+        verdict = "ok"
+    return {
+        "verdict": verdict,
+        "reasons": reasons,
+        "conflicts": conflicts,
+        "no_targets": bool(no_targets),
+        "intent_gap": intent_gap,
+        "intent_coverage": intent_coverage,
+        "intent_missing": intent.get("missing") or [],
+        "fact_gaps": fact_gaps,
+        "body_similar_to": variety.get("similar_to") if body_similar else None,
+        "body_similarity": variety.get("score") if body_similar else None,
+        "too_short": too_short,
+        "length_chars": length.get("chars"),
+        "length_target": length.get("target"),
+    }
+
+
+# Below this share of the target's lower bound a post is reported as short.
+# Not the bound itself: a model aiming for 1,500 lands a little either side,
+# and flagging 1,420자 would train the marketer to ignore the warning.
+LENGTH_SHORT_RATIO = 0.8
+
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
+
+
+def measure_length(content: str, target=None) -> Dict:
+    """Body length the way Naver's editor counts it (no spaces, no photo tags
+    or source footer) plus the average sentence length — the two numbers the
+    '너무 짧다' and '장황하다' complaints are actually about."""
+    body = re.sub(r"\[IMAGE:[^\]]*\]", "", content or "")
+    body = re.sub(r"\[원문 기사 출처:[^\]]*\]", "", body)
+    chars = len(re.sub(r"\s", "", body))
+    sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(body) if s.strip()]
+    avg = round(sum(len(s) for s in sentences) / len(sentences)) if sentences else 0
+    out = {"chars": chars, "avg_sentence": avg, "target": list(target) if target else None}
+    out["short"] = bool(target) and chars < target[0] * LENGTH_SHORT_RATIO
+    return out
+
+
+def _submit(pool: ThreadPoolExecutor, fn: Callable, *args):
+    """pool.submit that carries the caller's context into the worker thread.
+
+    ThreadPoolExecutor doesn't propagate contextvars, and repo.usage_scope
+    (which glues each LLM call's cost to the campaign being generated) is one.
+    Without this, the SNS writers' and search-intent calls would be logged
+    with no campaign and drop out of "이 글 생성 비용".
+    """
+    return pool.submit(contextvars.copy_context().run, fn, *args)
+
+
+def _blog_model(fn: Callable) -> Callable:
+    """블로그 글 파이프라인 전체가 '블로그 글 모델' 슬롯(비우면 기본 글쓰기 모델)을 따르게 한다."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        with text_slot("text_blog"):
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _attributed(fn: Callable) -> Callable:
+    """Runs a campaign job inside repo.usage_scope(campaign_id), so every LLM
+    call it makes is recorded against that campaign (요청 3: 글별 비용)."""
+    @functools.wraps(fn)
+    def wrapper(campaign_id: str, *args, **kwargs):
+        with repo.usage_scope(campaign_id):
+            return fn(campaign_id, *args, **kwargs)
+    return wrapper
+
+
+def run_cost(campaign_id: str, since_id: int) -> Dict:
+    """What this run cost — the usage rows logged for this campaign after `since_id`."""
+    summary = repo.cost_for_campaign(campaign_id, since_id=since_id)
+    return {
+        "calls": summary["calls"],
+        "input_tokens": summary["input_tokens"],
+        "output_tokens": summary["output_tokens"],
+        "cost_usd": summary["cost_usd"],
+        "cost_krw": summary["cost_krw"],
+        "unpriced_calls": summary["unpriced_calls"],
+    }
+
+
+def _format_report(content: str, content_format: dict) -> Dict:
+    """리포트에 남길 서식 요약 — 종류별 수, 교정으로 자리를 잃어 뺀 수."""
+    counts = formatting.summary(content, content_format)
+    return {
+        "strength": (content_format or {}).get("strength"),
+        "template": (content_format or {}).get("template"),
+        "items": len((content_format or {}).get("items") or []),
+        "dropped": int((content_format or {}).get("dropped") or 0) + counts.get("unmatched", 0),
+        "counts": {k: v for k, v in counts.items() if k != "unmatched" and v},
+    }
+
+
+@_attributed
+def apply_format(campaign_id: str, strength: Optional[str] = None, progress: Progress = None) -> Dict:
+    """[서식 적용] — 이미 생성된 글에 재생성 없이 서식만 입힙니다 (LLM 1회).
+
+    본문 글자는 바꾸지 않습니다. 모델이 고른 구절이 본문에 그대로 없으면 버리므로(
+    formatting.parse_apply_response), 검수를 다시 할 필요가 없습니다. 비용은 이 글의 비용으로 기록됩니다.
+    """
+    campaign = repo.get_campaign(campaign_id)
+    if not campaign:
+        raise RuntimeError(f"campaign {campaign_id} not found")
+    content = (campaign.get("content") or "").strip()
+    if not content:
+        raise RuntimeError("서식을 입힐 본문이 없습니다. 먼저 초안을 생성하세요.")
+    brand_kit = repo.get_campaign_brand_kit(campaign)
+    design = formatting.resolve(strength or campaign.get("design_strength"), brand_kit)
+    if design["strength"] == "none":
+        design["strength"] = formatting.DEFAULT_STRENGTH
+    usage_start = repo.last_usage_id()
+    _report(progress, "서식을 고르는 중…")
+    raw = generate_text(
+        vendor=get_configured_vendor(),
+        prompt=formatting.apply_prompt(content, design["template"], design["strength"],
+                                       bool(campaign.get("storage_file_paths"))),
+        system=formatting.APPLY_SYSTEM_PROMPT,
+        max_tokens=2500,
+        note="format-apply",
+    )
+    items = formatting.parse_apply_response(raw, content)
+    items = formatting.add_default_captions(content, items, caption_attachments(campaign.get("storage_file_paths") or []))
+    content_format = formatting.finalize(content, items, design["strength"], design["template"], source="apply")
+    report = dict(campaign.get("guardrail_report") or {})
+    report["format"] = _format_report(content, content_format)
+    report["format_cost"] = {**run_cost(campaign_id, usage_start), "kind": "format"}
+    repo.update_campaign(campaign_id, content_format=content_format, guardrail_report=report)
+    _report(progress, "완료")
+    return repo.get_campaign(campaign_id)
+
+
+def missing_photo_captions(content: str, content_format: Optional[dict]) -> int:
+    """본문의 [IMAGE:] 사진 중 사진 설명이 없는 장수."""
+    have = {i.get("path") for i in (content_format or {}).get("items") or [] if i.get("type") == "photo_caption"}
+    paths = {m.group(1).strip() for m in formatting.IMAGE_TAG_RE.finditer(content or "")}
+    return len(paths - have)
+
+
+def fill_photo_captions(campaign_id: str) -> int:
+    """설명이 없는 사진에 사진 분석이 읽어 둔 설명을 붙입니다 — 글자도 서식도 그대로이고 AI 호출이 없습니다(분석 결과는 캐시).
+    붙인 장수를 돌려줍니다."""
+    campaign = repo.get_campaign(campaign_id)
+    if not campaign or not (campaign.get("content") or "").strip():
+        return 0
+    content, fmt = campaign["content"], campaign.get("content_format") or {}
+    before = missing_photo_captions(content, fmt)
+    if not before:
+        return 0
+    items = formatting.add_default_captions(content, list(fmt.get("items") or []),
+                                            caption_attachments(campaign.get("storage_file_paths") or []))
+    brand_kit = repo.get_campaign_brand_kit(campaign)
+    design = formatting.resolve(campaign.get("design_strength"), brand_kit)
+    new_fmt = formatting.finalize(content, items, fmt.get("strength") or design["strength"],
+                                  fmt.get("template") or design["template"], source=fmt.get("source") or "generate")
+    repo.update_campaign(campaign_id, content_format=new_fmt)
+    return before - missing_photo_captions(content, new_fmt)
+
+
+def _report(progress: Progress, message: str) -> None:
+    # 이 print()는 순수 콘솔 디버그용이라 실패해도 무해해야 한다 — 그런데
+    # Windows 콘솔의 기본 코드페이지(한국어 환경은 cp949)는 여기 메시지에
+    # 흔히 섞이는 이모지(🔍·⚖️·📖 등)를 인코딩하지 못해 UnicodeEncodeError를
+    # 던졌고, 그게 잡히지 않은 채 run_pipeline 전체를 그 자리에서 죽여서
+    # progress(message)(=화면 진행 표시)가 호출조차 되지 못했다. 콘솔에
+    # 못 찍는 것과 실제 생성 파이프라인이 실패하는 것은 전혀 다른 문제라
+    # 여기서 확실히 분리한다.
+    try:
+        print(f"[content_writer] {message}")
+    except UnicodeEncodeError:
+        pass
+    if progress:
+        progress(message)
+
+
+def _quality_pass(
+    draft: str,
+    final_title: str,
+    target_keywords: List[str],
+    skipped_keywords: List[str],
+    brand_kit: dict,
+    vendor: str,
+    storage_file_paths: List[str],
+    is_news: bool,
+    source_url: Optional[str],
+    progress: Progress,
+    mode: Optional[dict] = None,
+    notice_fields: Optional[dict] = None,
+    product_fields: Optional[dict] = None,
+    history: Optional[List[dict]] = None,
+):
+    """Stages 3~6c: compliance, SEO density, and the deterministic backstops.
+
+    Shared by the from-scratch pipeline and `revise_content`, because a
+    revision is fresh LLM output making the same brand claims — it needs the
+    identical audit, not a lighter one. Returns (final_content, report).
+    """
+    profile = mode or content_mode.resolve(None, brand_kit)
+    # --- stage 2d: search-intent coverage ---
+    # Read-only: reports what a searcher for the target keyword expects and
+    # the draft doesn't answer. Deliberately does not write the answers —
+    # see search_intent's module docstring.
+    #
+    # Both read the same draft and neither feeds the other, so they run
+    # concurrently — two sequential LLM round trips become one.
+    _report(progress, "검색 의도 충족 점검 중…")
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        intent_future = _submit(pool, search_intent.run, final_title, draft, target_keywords, vendor)
+
+        # --- stage 3: compliance guardrail ---
+        if brand_kit.get("guardrail_enabled", True):
+            _report(progress, "컴플라이언스 검수 중…")
+        report = apply_guardrail_if_enabled(draft, brand_kit, vendor, notice_fields, product_fields)
+        report["search_intent"] = intent_future.result()
+    report["final_text"] = ensure_image_tags_preserved(draft, report["final_text"])
+
+    # --- stage 4: SEO keyword density ---
+    _report(progress, "네이버 SEO 키워드 밀도 확인 중…")
+    final_content, density_report = rebalance_keywords(
+        final_title, report["final_text"], target_keywords, vendor,
+        minimum=profile.get("density_min", 2), maximum=profile.get("density_max", 6),
+        enforce=profile.get("enforce_density", True),
+    )
+    report["seo_density"] = density_report
+
+    # --- stage 4b: guard against SEO rebalancing undoing the guardrail ---
+    # rebalance_keywords optimizes purely for keyword counts; if a target SEO
+    # keyword happens to be a phrase the guardrail just rewrote out (e.g. the
+    # admin's keyword list still has a greenwashing-flagged term), the LLM can
+    # reinsert it verbatim while chasing density. Only re-run the guardrail —
+    # one more LLM call — when that regression is actually detected.
+    #
+    # "Regressed" means gone after the guardrail and back after the SEO pass —
+    # a flagged phrase the guardrail left in place (no replacement proposed)
+    # is not something SEO undid, and re-auditing it would only repeat the
+    # same finding for the price of another call.
+    flagged_phrases = list(report.get("issue_phrases", {}).values())
+    guarded_lower = report["final_text"].lower()
+    regressed = [
+        p for p in flagged_phrases
+        if p and p.lower() not in guarded_lower and p.lower() in final_content.lower()
+    ]
+    if regressed:
+        _report(progress, "SEO 보정이 되살린 컴플라이언스 문구 재검수 중…")
+        reguard = apply_guardrail_if_enabled(final_content, brand_kit, vendor, notice_fields, product_fields)
+        final_content = ensure_image_tags_preserved(final_content, reguard["final_text"])
+        report["llm_issues"] = list(dict.fromkeys((report.get("llm_issues") or []) + reguard["llm_issues"]))
+        report["issue_phrases"] = {**report.get("issue_phrases", {}), **reguard.get("issue_phrases", {})}
+        report["seo_regression_fixed"] = regressed
+        report["audit_failed"] = bool(report.get("audit_failed") or reguard.get("audit_failed"))
+
+    # --- stage 4c: spelling / spacing ---
+    # Runs on every generation, not just on revisions: the marketer's typed
+    # edits reach here through revise_content, and the guardrail and SEO
+    # rewrites above are themselves fresh LLM output that can introduce
+    # errors. Placed before the deterministic backstops so those still have
+    # the last word on image tags and banned terms.
+    _report(progress, "맞춤법·오탈자 교정 중…")
+    final_content, applied_fixes, rejected_fixes = proofread(final_content, brand_kit, vendor)
+    report["proofread"] = {"applied": applied_fixes, "rejected": rejected_fixes}
+
+    # --- stages 5~6: deterministic backstops ---
+    final_content = ensure_image_tags_preserved(report["final_text"], final_content)
+    final_content, _ = apply_blacklist_dictionary(final_content, brand_kit.get("blacklist_map", {}))
+    final_content = ensure_all_photos_tagged(final_content, storage_file_paths)
+    final_content = strip_unresolvable_image_tags(final_content, storage_file_paths)
+
+    if is_news and source_url:
+        # 뉴스 큐레이션에서 온 글은 원문 기사 링크가 본문에 반드시 있어야 합니다
+        # (편집 방침) — 워크벤치에서 직접 쓴 글은 source_url 자체가 없어 이 블록을
+        # 타지 않으므로 애초에 링크가 붙지 않습니다. 다른 재작성 단계를 전부
+        # 거친 뒤 결정론적으로 붙입니다 — 각주가 LLM 재작성 여러 번을 [IMAGE:]
+        # 태그처럼 버텨낼 필요가 없게 하기 위해서입니다.
+        final_content = f"{final_content.rstrip()}\n\n[원문 기사 출처: {source_url}]"
+
+
+    # --- stage 6b: resolve issues already fixed in the text that ships ---
+    # `llm_issues` records what each guardrail pass found in *its own* input —
+    # not what's still in the text after every later rewrite. A phrase whose
+    # corrected_text already dropped it (or that stage 4b fixed) isn't a live
+    # problem just because it was quoted earlier; checking against the text
+    # that actually ships is what makes compliance_pass trustworthy.
+    phrase_map = report.get("issue_phrases", {})
+    still_open, resolved_issues = [], []
+    for issue in report.get("llm_issues") or []:
+        phrase = phrase_map.get(issue)
+        if phrase and phrase.lower() not in final_content.lower():
+            resolved_issues.append(issue)
+        else:
+            still_open.append(issue)
+    # The certification-scope finding quotes a whole sentence, so any later
+    # rewrite (SEO rebalance, proofread) changes the string and the check
+    # above would call it resolved without the over-claim having gone. It is
+    # deterministic and cheap, so re-run it on the text that actually ships
+    # rather than trying to track the sentence through every pass.
+    cert_issues = check_certification_scope(final_content, brand_kit)
+    for finding in cert_issues:
+        display = f"'{finding['phrase']}' — {finding['note']}"
+        if display not in still_open:
+            still_open.append(display)
+        report.setdefault("issue_phrases", {})[display] = finding["phrase"]
+    report["cert_scope_issues"] = [f["phrase"] for f in cert_issues]
+
+    report["llm_issues"] = still_open
+    report["resolved_issues"] = [i for i in resolved_issues if i not in still_open]
+    report["compliance_pass"] = not still_open
+
+    # --- stage 6c: re-measure density on the text that actually ships ---
+    # Stage 4's density was measured on the rebalanced draft, before stage 4b's
+    # re-audit and the deterministic passes above could strip words back out.
+    report["seo_density"] = check_keyword_density(
+        final_title, final_content, target_keywords,
+        profile.get("density_min", 2), profile.get("density_max", 6),
+    )
+    if not profile.get("enforce_density", True):
+        report["seo_density"]["enforced"] = False
+    report["seo_targets"] = target_keywords
+    report["seo_skipped"] = skipped_keywords
+    report["seo_pool"] = list(brand_kit.get("seo_keywords") or [])
+    report["content_mode"] = profile["key"]
+
+    # A keyword the compliance guardrail is obliged to remove can never reach
+    # its density target — regenerating just replays the same tug-of-war.
+    stripped = {p.lower() for p in report.get("issue_phrases", {}).values() if p}
+    stripped.update(p.lower() for p in report.get("seo_regression_fixed") or [])
+    report["seo_conflicts"] = [
+        kw for kw in report["seo_density"].get("missing") or []
+        if any(kw.lower() in s or s in kw.lower() for s in stripped)
+    ]
+
+    # 공지 사실은 측정만 하고 고치지 않습니다 — 날짜와 금액을 LLM이 되살리게
+    # 두는 것보다, 빠졌다고 알려주고 담당자가 편집기에서 넣는 편이 안전합니다.
+    report["notice"] = factsheet.coverage(factsheet.NOTICE, final_content, notice_fields)
+    report["product"] = factsheet.coverage(factsheet.PRODUCT, final_content, product_fields)
+
+    # --- stage 6d: body similarity to recent posts (report only) ---
+    # Measured on the text that ships, like everything above. `history` is
+    # None when the caller didn't look it up, which reports as unchecked.
+    report["body_variety"] = (
+        body_variety.report(final_content, history) if history is not None else {"checked": False}
+    )
+
+    # --- stage 6e: body length vs the mode's target (report only) ---
+    # Brief notices carry no target (see run_pipeline), so they are measured
+    # but never called short.
+    target = None
+    if not factsheet.is_brief_overall(
+        [(factsheet.NOTICE, notice_fields), (factsheet.PRODUCT, product_fields)]
+    ):
+        target = profile.get("length_range")
+    report["length"] = measure_length(final_content, target)
+
+    report["recommendation"] = _recommendation(report)
+    return final_content, report
+
+
+@_blog_model
+@_attributed
+def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
+    """Generates all four channels for a campaign and persists the result.
+
+    Raises on a failure that leaves nothing usable; the campaign row is
+    flipped to 'failed' with the error in `publish_error` first, so the
+    dashboard shows what happened instead of a silently stuck row.
+
+    Raises repo.CampaignBusyError without touching the row if a run for this
+    campaign is already in progress.
+    """
+    repo.begin_processing(campaign_id)
+    usage_start = repo.last_usage_id()
+    try:
+        vendor = get_configured_vendor()
+        campaign = repo.get_campaign(campaign_id)
+        if not campaign:
+            raise RuntimeError(f"campaign {campaign_id} not found")
+
+        brand_kit = repo.get_campaign_brand_kit(campaign)
+        # 생성할 때의 킷 이름을 글에 남깁니다 — 킷 이름이 나중에 바뀌어도 이 초안이
+        # 어느 킷으로 쓰였는지 보이게(core/db.py의 campaigns.brand_kit_name).
+        repo.update_campaign(campaign_id, brand_kit_id=brand_kit.get("id"), brand_kit_name=brand_kit.get("name"))
+        storage_file_paths = campaign.get("storage_file_paths") or []
+        memo = (campaign.get("memo") or "").strip()
+        given_title = (campaign.get("title") or "").strip()
+        source_url = campaign.get("source_url")
+        notice_fields = campaign.get("notice_fields") or {}
+        product_fields = campaign.get("product_fields") or {}
+        is_news = campaign.get("source_type") == "news"
+        seo_keywords = brand_kit.get("seo_keywords") or []
+        mode = content_mode.resolve(campaign.get("content_mode"), brand_kit)
+        _report(progress, f"콘텐츠 모드: {mode['icon']} {mode['label']}")
+        design = formatting.resolve(campaign.get("design_strength"), brand_kit)
+
+        # --- stage 0: news article (news track only) ---
+        article_text = ""
+        source_title = (campaign.get("source_title") or "").strip()
+        if is_news and source_url:
+            _report(progress, "뉴스 기사를 읽는 중…")
+            # Raises ArticleTooThin when the URL yields no usable body. That
+            # propagates: run_pipeline's except clause writes it to
+            # publish_error and flips the row to 'failed', which is the point
+            # — a newsjacking post whose article never loaded used to finish
+            # "successfully" as a generic brand post carrying a citation to
+            # an article it had not read.
+            article = scrape_article(source_url)
+            article_text = article.body
+            # Keyword-search results already carry the publisher's real title
+            # from the RSS metadata; the scraped <title> for a Google News
+            # link often lands on Google's redirect page instead.
+            source_title = source_title or article.title
+            # Cite (and remember) the outlet, not the aggregator. Persisting
+            # it also keeps the news-search dedup working on the resolved URL.
+            if article.url and article.url != source_url:
+                repo.update_campaign(campaign_id, source_url=article.url)
+                source_url = article.url
+            # The headline is context for the writer, never the post's title.
+            # Reusing it makes the post a 유사문서 in Naver's eyes (blog and
+            # news share one duplicate-detection space), so it loses to the
+            # original article — and it also skipped every title stage below,
+            # since a pre-filled title means `needs_title` is False.
+
+        # --- stage 1: photo captions (cached + batched) ---
+        _report(progress, f"사진 {len(storage_file_paths)}장 분석 중…" if storage_file_paths else "첨부 사진 없음")
+        captions = caption_attachments(storage_file_paths)
+
+        # --- stage 2: the draft ---
+        _report(progress, "블로그 본문 초안 작성 중…")
+        needs_title = not given_title
+        # Read from title_history, not from campaigns: the marketer prunes
+        # campaigns down to a handful, and titles of deleted posts still need
+        # to be avoided (core/db.py explains why they're stored separately).
+        title_history = repo.recent_titles() if needs_title else []
+        # Recent bodies: shown to the draft as "don't repeat these" and used
+        # again after the quality pass to measure how far this one landed
+        # from them — see ai_workers/body_variety.py.
+        post_history = repo.recent_posts(exclude_id=campaign_id, limit=body_variety.HISTORY_LIMIT)
+        kit_post_history = repo.recent_posts(
+            exclude_id=campaign_id,
+            limit=body_variety.HISTORY_LIMIT,
+            brand_kit_id=brand_kit.get("id"),
+        )
+        seed_blocks = []
+        if is_news and article_text:
+            seed_blocks.append(f"[뉴스 원문]\n{article_text[:3000]}")
+            if memo:
+                seed_blocks.append(f"[담당자 메모 — 이 뉴스와 엮고 싶은 자사 맥락]\n{memo}")
+            seed_blocks.append(
+                "위 뉴스를 우리 브랜드의 관점에서 재해석한 네이버 블로그 포스트 본문을 작성하세요. "
+                "뉴스를 그대로 요약하지 말고, 독자가 우리 제품/활동과 연결지어 읽을 수 있게 쓰되, "
+                "기사의 구체적인 내용(무엇이 왜 화제인지)이 글에 분명히 남아 있어야 합니다. "
+                + SUBJECT_INSTRUCTION
+            )
+        else:
+            seed_blocks.append(f"[담당자가 작성한 메모 — 이 글의 소재]\n{memo}")
+            seed_blocks.append(
+                "위 메모를 자연스럽게 확장한 네이버 블로그 포스트 본문을 작성하세요. "
+                + SUBJECT_INSTRUCTION
+            )
+        # 공지 정보는 뉴스/일반 어느 쪽이든 붙습니다 — 소재 설명 바로 뒤, 사진
+        # 지시 앞에 와야 '이 글이 알려야 할 사실'로 읽힙니다.
+        seed_blocks += notice_block(notice_fields, product_fields)
+
+        prompt = "\n\n".join(
+            seed_blocks
+            + [
+                f"[첨부 사진 및 설명 — 아래 목록의 사진만 사용 가능. 총 {len(captions)}장]\n"
+                + photo_context(captions),
+                photo_instruction(captions),
+            ]
+            + recent_posts_block(body_variety.prompt_history(kit_post_history))
+            + [
+            ]
+            + (
+                [
+                    _title_generation_instruction(
+                        title_candidates(
+                            seo_keywords,
+                            brand_kit.get("keyword_weights"),
+                            brand_kit.get("non_target_keywords"),
+                        ),
+                        source_title,
+                    )
+                    + avoidance_instruction(title_history)
+                ]
+                if needs_title
+                else [f"[제목]\n{given_title}"]
+            )
+        )
+
+        # 알릴 것이 적은 공지에서는 모드의 분량 목표를 걷어냅니다 —
+        # factsheet.is_brief_overall 참고. 모드 선택 자체는 건드리지 않습니다: 키워드
+        # 압력은 연휴 공지에도 그대로 적용되어야 합니다.
+        draft_mode = mode
+        if factsheet.is_brief_overall(
+            [(factsheet.NOTICE, notice_fields), (factsheet.PRODUCT, product_fields)]
+        ) and mode.get("length_range"):
+            draft_mode = {**mode, "length_range": None}
+
+        draft = generate_text(
+            vendor=vendor,
+            prompt=prompt,
+            system=build_blog_system_prompt(
+                brand_kit, draft_mode,
+                formatting.instruction(design["template"], design["strength"], bool(storage_file_paths)),
+            ),
+            # The ceiling moves with the length target. The target counts
+            # characters without spaces; with spaces a Korean post is ~1.3x
+            # that, and the tokenizers spend roughly one token per 1~1.5
+            # characters, so 1.5 tokens per target character leaves headroom
+            # for the title line and photo tags.
+            max_tokens=max(3000, int((draft_mode.get("length_range") or (0, 0))[1] * 1.5) + 1000),
+            note=f"blog-draft:{mode['key']}",
+        )
+
+        generated_title = None
+        if needs_title:
+            generated_title, draft = _extract_generated_title(draft)
+        # 서식 표시를 바로 떼어 냅니다 — 이 뒤의 검수·SEO·교정·SNS 단계는 평문 본문만 봅니다
+        # (ai_workers/formatting.py). 서식은 맨 끝에 교정된 본문 기준으로 다시 붙입니다.
+        draft, format_items = formatting.extract(draft)
+        if design["strength"] == "none":
+            format_items = []
+        final_title = given_title or (generated_title or "").strip() or "제목 미정"
+
+        # Checkpoint the paid-for draft before the audit/SEO stages, so an API
+        # error in any of them (rate limit, outage) leaves the draft in the
+        # editor instead of discarding the most expensive call of the run.
+        # Body only — the title isn't saved here, because a saved title would
+        # make the next run treat it as marketer-given and skip title
+        # generation. The stale report is cleared so the unaudited body is
+        # never shown next to a previous draft's '검수 통과'.
+        repo.update_campaign(
+            campaign_id, content=draft, guardrail_passed=None, guardrail_report=None
+        )
+
+        # --- stage 2a: pick this post's target keywords ---
+        # Every later SEO stage measures against these, not the whole brand
+        # pool — see select_target_keywords for why enforcing the full list
+        # produced stuffed drafts.
+        target_keywords = select_target_keywords(
+            final_title, draft, seo_keywords, limit=mode["max_targets"],
+            weights=brand_kit.get("keyword_weights"), min_mentions=mode["min_mentions"],
+            non_targets=brand_kit.get("non_target_keywords"),
+        )
+        skipped_keywords = [kw for kw in seo_keywords if kw not in target_keywords]
+
+        # --- stage 2b: title keyword verification ---
+        # Only applies to AI-generated titles — a title the marketer typed
+        # themselves is never rewritten out from under them (same rule
+        # `rebalance_keywords` already follows for the body-density pass).
+        title_missing_keywords: List[str] = []
+        # Demoted keywords are targets for the body but never for the title —
+        # see seo_optimizer.title_candidates. Without this the backstop puts
+        # back exactly what the generation instruction was just stopped from
+        # asking for.
+        title_eligible = title_candidates(
+            target_keywords,
+            brand_kit.get("keyword_weights"),
+            brand_kit.get("non_target_keywords"),
+        )
+        if needs_title and title_eligible and mode["rewrite_title"]:
+            title_missing_keywords = title_keyword_coverage(final_title, title_eligible)
+            if title_missing_keywords:
+                _report(progress, "제목에 SEO 키워드 보강 중…")
+                # History is passed so the candidate scorer can reject a
+                # keyword-bearing title that repeats a past headline, instead
+                # of leaving that entirely to the separate variety pass below.
+                final_title = rewrite_title_for_keyword(
+                    final_title, draft[:300], title_missing_keywords, vendor, title_history
+                )
+
+        # --- stage 2c: title variety against past titles ---
+        # Runs after 2b because forcing a keyword in can itself push the title
+        # back toward the shape of every other keyword-bearing title.
+        title_variety = {"checked": bool(needs_title and title_history), "rewritten": False}
+        if needs_title and title_history:
+            # Brand name and target keywords are required to repeat, so they
+            # are excluded from the comparison — see title_variety.py.
+            ignore_terms = list(seo_keywords) + [brand_kit.get("brand_name") or ""]
+            similar_to, score = closest_previous(final_title, title_history, ignore_terms)
+            title_variety["score"] = round(score, 2)
+            if similar_to and score >= SIMILARITY_THRESHOLD:
+                _report(progress, "과거 제목과 유사해 제목을 다시 짓는 중…")
+                candidate = rewrite_for_variety(
+                    final_title, similar_to, title_missing_keywords or title_eligible[:1],
+                    vendor, title_history,
+                )
+                # Keep the rewrite only if it still carries a target keyword —
+                # variety must not cost the SEO coverage stage 2b just secured.
+                # Measured against the title-eligible set, not every target: a
+                # demoted keyword was never allowed in the title, so its
+                # absence must not veto a rewrite.
+                if not title_eligible or title_keyword_coverage(candidate, title_eligible) != title_eligible:
+                    final_title = candidate
+                    title_variety["rewritten"] = True
+                    title_variety["similar_to"] = similar_to
+
+        # --- stage 2d: the title gets the banned-term dictionary too ---
+        # It never did. Every guardrail layer ran on the body only, so
+        # a title carrying a compliance-relevant term (e.g. a treatment
+        # promise like '완치') shipped in the single most visible line of
+        # the post.
+        # Deterministic substitution only: rewriting a title with an LLM here
+        # would undo the keyword and variety work just done above.
+        final_title, title_dict_hits = apply_blacklist_dictionary(
+            final_title, brand_kit.get("blacklist_map", {})
+        )
+
+        final_content, report = _quality_pass(
+            draft, final_title, target_keywords, skipped_keywords, brand_kit, vendor,
+            storage_file_paths, is_news, source_url, progress, mode, notice_fields,
+            product_fields, history=post_history,
+        )
+        report["title_dictionary_hits"] = title_dict_hits
+        report["title_seo"] = {
+            "checked": bool(needs_title and seo_keywords),
+            "fixed": bool(needs_title and title_missing_keywords),
+        }
+        report["title_variety"] = title_variety
+
+        # --- stage 7: secondary channels ---
+        # Shared with regenerate_sns so the first run and a later "SNS만 다시
+        # 만들기" produce the channels the same way (see _secondary_channels).
+        seed_note = memo or (article_text[:800] if article_text else final_title)
+        sns_fields, sns_report = _secondary_channels(
+            seed_note, list(captions.values()), final_title, final_content, brand_kit, vendor,
+            notice_fields, product_fields, target_keywords, progress,
+        )
+        report.update(sns_report)
+        format_items = formatting.add_default_captions(final_content, format_items, captions)
+        content_format = formatting.finalize(final_content, format_items, design["strength"], design["template"])
+        report["format"] = _format_report(final_content, content_format)
+        report["cost"] = {**run_cost(campaign_id, usage_start), "kind": "generate"}
+
+        repo.update_campaign(
+            campaign_id,
+            status="draft",
+            title=final_title,
+            source_title=source_title or None,
+            content=final_content,
+            content_format=content_format,
+            guardrail_passed=report["compliance_pass"],
+            guardrail_report=report,
+            **sns_fields,
+        )
+        # Outlives this campaign on purpose, so a future run still avoids this
+        # title after the marketer prunes the campaign list (core/db.py).
+        repo.record_title(final_title, campaign_id)
+        _report(progress, "완료")
+        return repo.get_campaign(campaign_id)
+
+    except Exception as exc:
+        repo.update_campaign(campaign_id, status="failed", publish_error=str(exc))
+        raise
+
+
+LENGTH_MODES = {
+    "keep": {"label": "그대로", "ratio": None},
+    "longer": {"label": "20% 길게", "ratio": 1.2},
+    "shorter": {"label": "20% 짧게", "ratio": 0.8},
+}
+
+REVISION_SYSTEM_PROMPT = (
+    "당신은 네이버 블로그 편집자입니다. 아래 본문을 담당자의 요청에 따라 고쳐 쓰세요. "
+    "요청과 무관한 부분은 원문의 문장과 표현을 그대로 유지하고, 요청된 부분만 바꿉니다. "
+    "새로운 사실이나 수치를 지어내지 마세요. "
+    "`[IMAGE: 경로]` 형식의 태그는 사진이 삽입될 위치 마크업이므로 삭제·수정하지 말고, "
+    "개수와 순서를 그대로 유지한 채 문맥에 맞는 자리에 남겨두세요. "
+    "고쳐 쓴 본문 전체만 출력하고 다른 설명은 절대 덧붙이지 마세요."
+)
+
+
+@_blog_model
+@_attributed
+def revise_content(
+    campaign_id: str,
+    instruction: str = "",
+    length_mode: str = "keep",
+    progress: Progress = None,
+) -> Dict:
+    """Rewrites the *current* body — including the marketer's manual edits —
+    instead of regenerating from the memo the way `run_pipeline` does.
+
+    `run_pipeline` always starts from the memo, so it throws away whatever the
+    marketer typed into the editor. That makes it the wrong tool for "make
+    this bit warmer" or "trim it a bit", which is most of the real editing
+    loop. The revision output is fresh LLM text making brand claims, so it
+    goes through the same `_quality_pass` audit rather than a lighter one.
+
+    Instagram/X/쇼츠 are not regenerated automatically — most revisions are
+    wording changes that don't need four more LLM calls. Instead, when the
+    body changed, the report marks them `sns_stale` and the workbench offers
+    regenerate_sns ("SNS 3채널 다시 만들기"), so a price or date fixed in the
+    body can't silently stay wrong in the SNS copy. Naver tags are refreshed
+    here because they are derived from the body.
+    """
+    campaign = repo.get_campaign(campaign_id)
+    if not campaign:
+        raise RuntimeError(f"campaign {campaign_id} not found")
+
+    base_content = (campaign.get("content") or "").strip()
+    if not base_content:
+        raise RuntimeError("수정할 본문이 없습니다. 먼저 초안을 생성하세요.")
+    # 편집창에 담당자가 직접 **굵게** 같은 서식 표시를 넣었으면 서식 목록으로 옮깁니다.
+    previous_format = campaign.get("content_format") or {}
+    format_items = list(previous_format.get("items") or [])
+    if formatting.has_markup(base_content):
+        base_content, typed = formatting.extract(base_content)
+        format_items += typed
+
+    instruction = (instruction or "").strip()
+    ratio = LENGTH_MODES.get(length_mode, LENGTH_MODES["keep"])["ratio"]
+
+    previous_status = repo.begin_processing(campaign_id)
+    usage_start = repo.last_usage_id()
+    try:
+        vendor = get_configured_vendor()
+        brand_kit = repo.get_campaign_brand_kit(campaign)
+        seo_keywords = brand_kit.get("seo_keywords") or []
+        final_title = (campaign.get("title") or "").strip() or "제목 미정"
+        storage_file_paths = campaign.get("storage_file_paths") or []
+
+        requests = []
+        if instruction:
+            requests.append(f"[담당자 수정 요청]\n{instruction}")
+        if ratio:
+            # An explicit character target is far more reliable than "조금 더
+            # 길게" — the model has no sense of the current length otherwise.
+            target = int(len(base_content) * ratio)
+            direction = "늘려" if ratio > 1 else "줄여"
+            requests.append(
+                f"[분량 조정]\n현재 본문은 약 {len(base_content)}자입니다. "
+                f"내용을 {direction} 약 {target}자 내외로 다시 쓰세요. "
+                + (
+                    "새로운 사실을 지어내지 말고, 기존 내용의 묘사와 설명을 더 구체적으로 풀어 쓰세요."
+                    if ratio > 1
+                    else "핵심 메시지와 사진 태그는 유지하고 군더더기 표현을 덜어내세요."
+                )
+            )
+
+        # 줄여 쓰기 요청은 군더더기부터 덜어내는데, 공지·제품 글에서 가장
+        # 군더더기처럼 보이는 줄이 정작 일시·가격·주문 방법입니다. 수정 호출이
+        # 실제로 일어날 때만 붙입니다.
+        if requests:
+            kept_lines = []
+            for sheet, given in (
+                (factsheet.NOTICE, campaign.get("notice_fields")),
+                (factsheet.PRODUCT, campaign.get("product_fields")),
+            ):
+                kept_lines += [
+                    f"- {sheet.labels[k]}: {v}"
+                    for k, v in factsheet.clean(sheet, given).items()
+                ]
+            if kept_lines:
+                requests.append(
+                    "[핵심 정보 유지]\n다음 사실은 이 글의 존재 이유이므로 어떤 수정 "
+                    "요청에도 본문에서 빼거나 바꾸지 마세요:\n" + "\n".join(kept_lines)
+                )
+
+        if requests:
+            _report(progress, "수정 요청 반영 중…")
+            revised = generate_text(
+                vendor=vendor,
+                prompt=f"[현재 본문]\n{base_content}\n\n" + "\n\n".join(requests),
+                system=REVISION_SYSTEM_PROMPT,
+                # Headroom for the longer case: Korean runs ~2 characters/token.
+                max_tokens=max(2500, int(len(base_content) * (ratio or 1) / 2) + 800),
+                note=f"revision:{length_mode}",
+            )
+            revised = ensure_image_tags_preserved(base_content, revised.strip() or base_content)
+        else:
+            # No instruction and no length change: the marketer just wants
+            # their edits checked. _quality_pass still proofreads and re-audits,
+            # so skipping the rewrite call costs nothing but tokens saved.
+            revised = base_content
+
+        # Re-select targets from the revised text: a length change can drop a
+        # keyword the previous target set relied on.
+        mode = content_mode.resolve(campaign.get("content_mode"), brand_kit)
+        target_keywords = select_target_keywords(
+            final_title, revised, seo_keywords, limit=mode["max_targets"],
+            weights=brand_kit.get("keyword_weights"), min_mentions=mode["min_mentions"],
+            non_targets=brand_kit.get("non_target_keywords"),
+        )
+        skipped_keywords = [kw for kw in seo_keywords if kw not in target_keywords]
+
+        final_content, report = _quality_pass(
+            revised, final_title, target_keywords, skipped_keywords, brand_kit, vendor,
+            storage_file_paths, campaign.get("source_type") == "news",
+            campaign.get("source_url"), progress, mode,
+            campaign.get("notice_fields") or {}, campaign.get("product_fields") or {},
+            history=repo.recent_posts(exclude_id=campaign_id, limit=body_variety.HISTORY_LIMIT),
+        )
+        report["revision"] = {
+            "instruction": instruction,
+            "length_mode": length_mode,
+            "before_chars": len(base_content),
+            "after_chars": len(final_content),
+        }
+
+        naver_hashtags = _safe(
+            progress, "네이버 발행 태그 갱신 중…",
+            lambda: write_naver_hashtags(final_title, final_content, target_keywords, vendor),
+            campaign.get("naver_hashtags") or [],
+        )
+        naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords))
+
+        # The SNS channels aren't regenerated here (see docstring), and this
+        # report replaces the old one — which used to drop the channels'
+        # compliance/format results along with it. Carry them over, and say
+        # plainly when they now describe an older body.
+        previous = campaign.get("guardrail_report") or {}
+        for key in SNS_REPORT_KEYS:
+            if key in previous:
+                report[key] = previous[key]
+        report.setdefault("sns_checks", {})["naver_tags"] = tag_issues
+        has_sns = bool(campaign.get("instagram_caption") or campaign.get("shorts_script"))
+        report["sns_stale"] = has_sns and (
+            bool(previous.get("sns_stale")) or final_content.strip() != (campaign.get("content") or "").strip()
+        )
+        design = formatting.resolve(campaign.get("design_strength"), brand_kit)
+        content_format = (
+            formatting.finalize(final_content, format_items, previous_format.get("strength") or design["strength"],
+                                previous_format.get("template") or design["template"],
+                                source=previous_format.get("source") or "generate")
+            if format_items else previous_format
+        )
+        report["format"] = _format_report(final_content, content_format)
+        report["cost"] = {**run_cost(campaign_id, usage_start), "kind": "revise"}
+
+        repo.update_campaign(
+            campaign_id,
+            status="draft",
+            content=final_content,
+            content_format=content_format,
+            guardrail_passed=report["compliance_pass"],
+            guardrail_report=report,
+            naver_hashtags=naver_hashtags,
+        )
+        _report(progress, "완료")
+        return repo.get_campaign(campaign_id)
+
+    except Exception as exc:
+        # A failed *revision* leaves the existing body untouched, so the
+        # campaign goes back to what it was (e.g. a finished draft) rather
+        # than being demoted to 'failed' — which would hide a perfectly good
+        # draft behind an error state over a transient API hiccup. The error
+        # is still recorded and re-raised for the screen to show.
+        repo.update_campaign(
+            campaign_id,
+            status=previous_status if previous_status != "processing" else "draft",
+            publish_error=str(exc),
+        )
+        raise
+
+
+# How much of the finished blog body the SNS writers see. Enough to carry the
+# facts and figures of a normal post; the writers only need to stay consistent
+# with it, not reproduce it.
+SNS_BODY_EXCERPT = 2000
+
+# How many of the four SNS writers (Instagram / Shorts / Naver tags) run at
+# once. Each writer is a generation call plus a compliance-audit call, so all
+# four at once put a burst of ~8 requests on the provider within seconds —
+# and under load Gemini answers a burst with "503 UNAVAILABLE — high demand",
+# which is how the Instagram caption failed while the (sequential) Naver body
+# succeeded. Two at a time roughly halves the burst for a somewhat longer
+# wait; the per-call retry in multi_llm_router.google_client covers the rest.
+SNS_CONCURRENCY = 2
+
+_SNS_SEGMENT = "\n<<<SEG>>>\n"
+
+
+def _sns_facts(final_content: str, notice_fields: dict, product_fields: dict) -> str:
+    """What the SNS writers must agree with: the confirmed notice/product
+    values and the finished, already-audited blog body.
+
+    The writers used to get only the memo and photo captions. A date, price
+    or quantity that lived in the notice/product sheets — or a figure from the
+    news article on a newsjacking post — never reached Instagram, X or Shorts,
+    so those channels either left it out or had to guess it.
+    """
+    blocks = []
+    lines = []
+    for sheet, given in ((factsheet.NOTICE, notice_fields), (factsheet.PRODUCT, product_fields)):
+        lines += [f"- {sheet.labels[k]}: {v}" for k, v in factsheet.clean(sheet, given).items()]
+    if lines:
+        blocks.append(
+            "[이 글의 확정 사실 — 일시·장소·가격·수량 등은 아래와 똑같이 쓰세요. "
+            "여기에 없는 숫자는 지어내지 마세요]\n" + "\n".join(lines)
+        )
+    body = re.sub(r"\[IMAGE:[^\]]*\]", "", final_content or "")
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    if body:
+        blocks.append(
+            "[같은 소재로 이미 검수를 마친 네이버 블로그 본문 — 내용과 숫자가 이 글과 어긋나면 "
+            "안 됩니다. 문장을 그대로 옮기지 말고 이 채널에 맞게 새로 쓰세요]\n"
+            + body[:SNS_BODY_EXCERPT]
+        )
+    return "\n\n".join(blocks)
+
+
+def _proofread_sns(instagram: dict, shorts: dict, brand_kit: dict, vendor: str) -> List[Dict]:
+    """Spelling/spacing for all three SNS channels in **one** call.
+
+    Proofreading used to run on the blog body only, so captions, tweets and
+    on-screen text shipped unchecked. One call over the joined text instead of
+    three keeps the cost at a single short request; if the model disturbs the
+    segment delimiters the originals are kept (the corrections are optional,
+    the alignment is not). Returns the applied corrections for the report.
+    """
+    scenes = shorts.get("scenes") or []
+    segments = (
+        [instagram.get("caption") or ""]
+        + [shorts.get("title") or "", shorts.get("hook") or ""]
+        + [s.get("caption") or "" for s in scenes]
+    )
+    if not any(seg.strip() for seg in segments):
+        return []
+    try:
+        corrected, applied, _rejected = proofread(_SNS_SEGMENT.join(segments), brand_kit, vendor)
+    except Exception as exc:  # noqa: BLE001 — proofreading is never allowed to fail a run
+        print(f"[content_writer] SNS proofread skipped: {exc}")
+        return []
+    parts = corrected.split(_SNS_SEGMENT)
+    if len(parts) != len(segments):
+        print(f"[content_writer] SNS proofread returned {len(parts)} segments for {len(segments)} — keeping originals")
+        return []
+
+    instagram["caption"] = parts[0]
+    shorts["title"], shorts["hook"] = parts[1], parts[2]
+    for scene, caption in zip(scenes, parts[3:]):
+        scene["caption"] = caption
+    return applied
+
+
+# ⚙️ 설정 → 📣 생성 채널에서 켜고 끌 수 있는 SNS 채널. 네이버 블로그 본문과 발행 태그는 항상
+# 만듭니다 — SNS 글은 그 본문을 원문으로 삼아 씁니다.
+SNS_CHANNELS = {
+    "instagram": "📸 인스타그램",
+    # 쇼츠 대본은 카드 기준(🎬 쇼츠 영상 탭, cards/shorts_script.py) 한 가지로 통일했습니다. 예전 컷 자막 생성은 끕니다
+    # (이미 만들어 둔 내용은 그대로 남습니다).
+}
+
+
+def enabled_channels(settings: dict) -> List[str]:
+    """SNS channels to generate. A channel switched off costs nothing — no
+    writer call and no audit call — which matters for a channel the company
+    doesn't post to: each one is two LLM requests on every generation."""
+    stored = settings.get("enabled_channels")
+    if stored is None:
+        return list(SNS_CHANNELS)
+    return [key for key in SNS_CHANNELS if key in stored]
+
+
+def _sns_fact_coverage(instagram: dict, notice_fields: dict, product_fields: dict) -> Dict:
+    """Which confirmed notice/product values each SNS post left out — the
+    same measurement the blog body gets (factsheet.coverage). Report only: a
+    caption doesn't have to carry every field, but the marketer should see
+    that the date or price isn't there before posting it."""
+    out = {}
+    texts = {"instagram": instagram.get("caption") or ""}
+    for channel, text in texts.items():
+        missing = []
+        for sheet, given in ((factsheet.NOTICE, notice_fields), (factsheet.PRODUCT, product_fields)):
+            cov = factsheet.coverage(sheet, text, given)
+            if cov.get("checked"):
+                missing += cov.get("missing_labels") or []
+        if missing:
+            out[channel] = missing
+    return out
+
+
+def _secondary_channels(
+    seed_note: str,
+    caption_values: List[str],
+    final_title: str,
+    final_content: str,
+    brand_kit: dict,
+    vendor: str,
+    notice_fields: dict,
+    product_fields: dict,
+    target_keywords: List[str],
+    progress: Progress,
+):
+    """Instagram / Shorts / Naver tags, audited, proofread and format-
+    checked. Returns (campaign fields, report entries).
+
+    Used by run_pipeline and regenerate_sns, so a regeneration after the body
+    was revised goes through exactly the same stages as the first run.
+    """
+    facts = _sns_facts(final_content, notice_fields, product_fields)
+    enabled = set(enabled_channels(brand_kit))
+
+    # The writers are independent of each other, and each is 1~2 sequential
+    # LLM round trips — run them concurrently so the slowest ones, not the
+    # sum of all of them, set the wait. _safe keeps each one best-effort.
+    # Capped at SNS_CONCURRENCY rather than all at once — see there. A channel
+    # switched off in ⚙️ 설정 is never submitted (no writer, no audit).
+    empty = {
+        "instagram": {"caption": "", "hashtags": []},
+        "shorts": {"title": "", "hook": "", "scenes": [], "hashtags": []},
+    }
+    jobs = {
+        "instagram": ("인스타그램 캡션 생성 중…", lambda: _guarded_instagram(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+        "shorts": ("쇼츠 구성안 생성 중…", lambda: _guarded_shorts(
+            seed_note, caption_values, brand_kit, vendor, notice_fields, product_fields, facts
+        )),
+    }
+    with ThreadPoolExecutor(max_workers=SNS_CONCURRENCY) as pool:
+        futures = {
+            key: _submit(pool, _safe, progress, message, fn, empty[key])
+            for key, (message, fn) in jobs.items() if key in enabled
+        }
+        tags_future = _submit(pool, 
+            _safe, progress, "네이버 발행 태그 생성 중…",
+            lambda: write_naver_hashtags(final_title, final_content, list(target_keywords or []), vendor),
+            [],
+        )
+        results = {key: (futures[key].result() if key in futures else dict(empty[key])) for key in empty}
+        naver_hashtags = tags_future.result()
+    instagram, shorts = results["instagram"], results["shorts"]
+
+    _report(progress, "SNS 맞춤법·오탈자 교정 중…")
+    sns_proofread = _proofread_sns(instagram, shorts, brand_kit, vendor)
+
+    # --- platform format checks ---
+    # The writers are only *told* the limits. Verify them.
+    _report(progress, "SNS 형식 검증 중…")
+    instagram["caption"], instagram["hashtags"], ig_issues = validate_instagram(
+        instagram["caption"], instagram["hashtags"]
+    )
+    # 컴플라이언스 요약은 리포트 전용이라 DB 컬럼(shorts_script)에 들어가기 전에 떼어냅니다.
+    shorts_compliance = shorts.pop("compliance", None) or {"checked": False}
+    shorts, shorts_issues = validate_shorts(shorts)
+    naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords or []))
+
+    # 꺼진 채널은 덮어쓰지 않습니다 — 예전에 만든 내용이 있으면 그대로 남습니다. 리포트에서도
+    # 빼서, 만들지 않은 채널을 '비어 있음'이나 '입력값 누락'으로 잘못 알리지 않습니다.
+    channel_fields = {
+        "instagram": {"instagram_caption": instagram["caption"], "instagram_hashtags": instagram["hashtags"]},
+        "shorts": {"shorts_script": shorts},
+    }
+    fields = {"naver_hashtags": naver_hashtags}
+    for key in enabled:
+        fields.update(channel_fields[key])
+    checks = {"instagram": ig_issues, "shorts": shorts_issues}
+    compliance = {
+        "instagram": instagram.get("compliance") or {"checked": False},
+        "shorts": shorts_compliance,
+    }
+    fact_gaps = _sns_fact_coverage(instagram, notice_fields, product_fields)
+    report = {
+        "sns_checks": {**{k: v for k, v in checks.items() if k in enabled}, "naver_tags": tag_issues},
+        # 형식 검증과는 별개입니다 — 이건 컴플라이언스 위반이 실제로 남아 있는지입니다.
+        "sns_compliance": {k: v for k, v in compliance.items() if k in enabled},
+        "sns_proofread": sns_proofread,
+        "sns_fact_gaps": {k: v for k, v in fact_gaps.items() if k in enabled},
+        "sns_channels": sorted(enabled),
+        "sns_stale": False,
+    }
+    return fields, report
+
+
+# Report entries that describe the SNS channels rather than the blog body —
+# carried over when only the body is revised (see revise_content).
+SNS_REPORT_KEYS = ("sns_checks", "sns_compliance", "sns_proofread", "sns_fact_gaps", "sns_channels")
+
+
+@_attributed
+def regenerate_sns(campaign_id: str, progress: Progress = None) -> Dict:
+    """Rebuilds Instagram / Shorts / Naver tags from the *current* body.
+
+    revise_content deliberately leaves the SNS channels alone (four LLM calls
+    for what is usually a wording change), and a body edited by hand never
+    touched them either — so after a price or date changed in the body the
+    channels kept the old one with nothing saying so. The body revision now
+    marks them stale, and this is the one-click way to bring them back in line.
+    """
+    previous_status = repo.begin_processing(campaign_id)
+    try:
+        vendor = get_configured_vendor()
+        campaign = repo.get_campaign(campaign_id)
+        brand_kit = repo.get_campaign_brand_kit(campaign)
+        report = dict(campaign.get("guardrail_report") or {})
+        content = campaign.get("content") or ""
+        title = (campaign.get("title") or "").strip() or "제목 미정"
+        if not content.strip():
+            raise RuntimeError("본문이 없습니다. 먼저 초안을 생성하세요.")
+
+        captions = caption_attachments(campaign.get("storage_file_paths") or [])
+        memo = (campaign.get("memo") or "").strip()
+        sns_fields, sns_report = _secondary_channels(
+            memo or title, list(captions.values()), title, content, brand_kit, vendor,
+            campaign.get("notice_fields") or {}, campaign.get("product_fields") or {},
+            report.get("seo_targets") or [], progress,
+        )
+        report.update(sns_report)
+        repo.update_campaign(
+            campaign_id,
+            status=previous_status if previous_status not in ("processing", "failed") else "draft",
+            publish_error=None,
+            guardrail_report=report,
+            **sns_fields,
+        )
+        _report(progress, "완료")
+        return repo.get_campaign(campaign_id)
+    except Exception as exc:
+        repo.update_campaign(
+            campaign_id,
+            status=previous_status if previous_status != "processing" else "draft",
+            publish_error=str(exc),
+        )
+        raise
+
+
+def _safe(progress: Progress, message: str, fn: Callable, fallback):
+    """Secondary channels are best-effort: the Naver draft is the primary
+    deliverable and a caption failure must never discard it."""
+    _report(progress, message)
+    try:
+        return fn()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[content_writer] {message} failed: {exc}")
+        return fallback
+
+
+def _compliance_summary(guarded: dict) -> dict:
+    """The subset of a guardrail result worth showing the marketer for a
+    secondary channel — same shape for Instagram and X so the workbench can
+    render both with one code path.
+
+    Extracted because the caller used to keep only `final_text` and throw the
+    rest away. The deterministic dictionary substitution still landed (it's
+    baked into `final_text` either way), but anything the *LLM audit* only
+    flagged rather than auto-corrected — including the certification-scope
+    check, which by design never rewrites text, only detects — vanished
+    without a trace. A live 미보유 인증 확대 sentence ('키노피스의 주요 제품들은
+    … 인증을 받아') shipped in an Instagram caption during testing with the
+    report showing nothing wrong, because nothing downstream of this function
+    ever looked at `compliance_pass` or `llm_issues` for these two channels.
+
+    `llm_issues` (`grounded_issues` inside guardrail.py) is checked against
+    the *pre-correction* draft the audit read, not the corrected text it
+    returned — a finding is "grounded" simply because the model found it
+    somewhere in what it was given, which is trivially almost always true.
+    The Naver body has a dedicated re-check (`_quality_pass` stage 6b) that
+    reopens or resolves each finding against the text that actually ships;
+    without the same re-check here, a caption where the audit itself already
+    fixed '10년 동안' still reported "컴플라이언스 미해결" for a phrase that
+    was no longer anywhere in what got saved. Re-running that same check
+    against `guarded["final_text"]` here closes the gap.
+    """
+    phrase_map = guarded.get("issue_phrases") or {}
+    shipped = (guarded.get("final_text") or "").lower()
+    still_open = [
+        issue for issue in (guarded.get("llm_issues") or [])
+        # 인용 문구가 없으면 검증할 수 없으니(설계상 늘 그렇듯) 미해결로 둡니다.
+        if not phrase_map.get(issue) or phrase_map[issue].lower() in shipped
+    ]
+    return {
+        "checked": guarded.get("compliance_pass") is not None,
+        "compliance_pass": (not still_open) if guarded.get("compliance_pass") is not None else None,
+        "score": guarded.get("score"),
+        "issues": still_open,
+        "dictionary_hits": list(guarded.get("dictionary_hits") or []),
+        "auto_removed": list(guarded.get("auto_removed") or []),
+        "tags_removed": list(guarded.get("tags_removed") or []),
+    }
+
+
+def _finalize_sns(guarded: dict, texts: List[str], hashtags: List[str], brand_kit: dict):
+    """Deterministic certification clean-up for a short SNS post, after the
+    audit. Returns (texts, hashtags) and records what it did on `guarded`.
+
+    * Sentences that stretch a certification over the whole catalogue are
+      deleted (guardrail.remove_certification_overclaims) — in a caption they
+      are removable filler, and left in place they kept the post '미해결'.
+    * Certification hashtags are dropped when no certification statement is
+      left in the text (guardrail.filter_certification_hashtags).
+
+    `guarded["final_text"]` is reset to the text that actually ships, so the
+    resolution check in _compliance_summary sees the deletions and closes
+    the findings they fixed. Skipped when the guardrail is switched off.
+    """
+    if not brand_kit.get("guardrail_enabled", True):
+        return texts, hashtags
+    cleaned, removed = [], []
+    for text in texts:
+        text, gone = remove_certification_overclaims(text or "", brand_kit)
+        cleaned.append(text)
+        removed += gone
+    kept_tags, dropped_tags = filter_certification_hashtags(hashtags, "\n".join(cleaned), brand_kit)
+    guarded["final_text"] = "\n".join(cleaned)
+    guarded["auto_removed"] = removed
+    guarded["tags_removed"] = dropped_tags
+    return cleaned, kept_tags
+
+
+def _guarded_instagram(
+    note: str, caption_values: List[str], brand_kit: dict, vendor: str,
+    notice_fields: Optional[dict] = None, product_fields: Optional[dict] = None,
+    facts: str = "",
+) -> dict:
+    """The caption goes through the same compliance guardrail as the Naver
+    body — it's separately generated text making its own claims about the
+    brand, not a derivative of the audited body, so skipping it would leave a
+    real compliance gap."""
+    result = write_instagram_caption(note, caption_values, brand_kit, vendor, facts)
+    guarded = apply_guardrail_if_enabled(
+        result["caption"], brand_kit, vendor, notice_fields, product_fields
+    )
+    (result["caption"],), result["hashtags"] = _finalize_sns(
+        guarded, [guarded["final_text"]], result.get("hashtags") or [], brand_kit
+    )
+    result["compliance"] = _compliance_summary(guarded)
+    return result
+
+
+_SHORTS_DELIMITER = "\n<<<SEG>>>\n"
+
+
+def _guarded_shorts(
+    note: str, caption_values: List[str], brand_kit: dict, vendor: str,
+    notice_fields: Optional[dict] = None, product_fields: Optional[dict] = None,
+    facts: str = "",
+) -> dict:
+    """Same audit as Instagram/X, applied last — this channel had none at all.
+
+    Only the title, hook and on-screen captions are audited: those are the
+    words a viewer reads, and the only place a greenwashing or over-broad
+    certification claim could actually land. `shot`(촬영 지시) is a filming
+    instruction the audience never sees, so it is not brand copy and is left
+    out of both the audit and the segment count.
+
+    Same delimiter-split-and-realign approach as `_guarded_instagram`, for the same
+    reason: one audit call for the whole script instead of one per line, and
+    a fallback to dictionary-only substitution if the model doesn't return
+    the segments intact.
+    """
+    result = write_shorts_script(note, caption_values, brand_kit, vendor, facts)
+    scenes = result.get("scenes") or []
+    segments = [result.get("title", ""), result.get("hook", "")] + [
+        s.get("caption", "") for s in scenes
+    ]
+    if not any(seg.strip() for seg in segments) or not brand_kit.get("guardrail_enabled", True):
+        result["compliance"] = _compliance_summary({})
+        return result
+
+    joined = _SHORTS_DELIMITER.join(segments)
+    guarded = apply_guardrail_if_enabled(joined, brand_kit, vendor, notice_fields, product_fields)
+    parts = [p.strip() for p in guarded["final_text"].split(_SHORTS_DELIMITER.strip())]
+
+    if len(parts) == len(segments):
+        result["title"], result["hook"], *cut_captions = parts
+        for scene, caption in zip(scenes, cut_captions):
+            scene["caption"] = caption
+    else:
+        print(
+            f"[content_writer] Shorts guardrail returned {len(parts)} segments for "
+            f"{len(segments)} — keeping originals with dictionary substitution only."
+        )
+        blacklist = brand_kit.get("blacklist_map", {})
+        result["title"] = apply_blacklist_dictionary(result.get("title", ""), blacklist)[0]
+        result["hook"] = apply_blacklist_dictionary(result.get("hook", ""), blacklist)[0]
+        for scene in scenes:
+            scene["caption"] = apply_blacklist_dictionary(scene.get("caption", ""), blacklist)[0]
+    # Per segment, so a deletion never shifts the delimiter alignment.
+    texts = [result.get("title", ""), result.get("hook", "")] + [s.get("caption", "") for s in scenes]
+    texts, result["hashtags"] = _finalize_sns(guarded, texts, result.get("hashtags") or [], brand_kit)
+    result["title"], result["hook"], *cut_captions = texts
+    for scene, caption in zip(scenes, cut_captions):
+        scene["caption"] = caption
+    result["compliance"] = _compliance_summary(guarded)
+    return result

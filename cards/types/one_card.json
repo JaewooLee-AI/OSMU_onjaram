@@ -1,0 +1,25 @@
+{
+ "id": "one_card",
+ "name": "한 장 카드 (1장 요약)",
+ "status": "available",
+ "desc": "제목·핵심 한두 문장·마무리 한 줄을 카드 한 장에 담는 구성",
+ "fit": "공지·안내·한 줄 메시지처럼 한 장으로 충분한 원고",
+ "template": "【제목 한 줄】\n핵심: 【가장 전하고 싶은 한두 문장】\n마무리: 【한 줄 응원 또는 안내】",
+ "tips": [
+  "한 장에는 한 가지 메시지만 담습니다",
+  "연락처는 카드 아래 소속 줄에 자동으로 들어갑니다"
+ ],
+ "count": {
+  "min": 1,
+  "max": 1,
+  "default": 1
+ },
+ "sequence": [
+  {
+   "archetype": "single",
+   "hint": "제목 + 핵심 한두 문장 + 마무리 한 줄"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "카드는 정확히 1장(single). lead_headline에 제목, body_content에 핵심 한두 문장, takeaway에 마무리 한 줄. 원문에 없는 사실·숫자는 만들지 말 것"
+}

@@ -1,0 +1,36 @@
+{
+ "id": "expert",
+ "name": "전문가 3단형 (제목 + 사진/영상 + 소속·이름)",
+ "status": "available",
+ "desc": "위 제목, 가운데 전문가 사진·영상, 아래 소속·이름 — 병원 카드뉴스에서 흔한 구성",
+ "fit": "전문가 인터뷰·칼럼, 한 가지 주제를 사진·영상 한 장면과 함께 전하는 원고",
+ "template": "【주제 한 줄 — 예: '이가 시려요' 원인과 대처법】\n핵심 1: 【…】\n핵심 2: 【…】\n핵심 3: 【…】\n전문가: 【소속·이름】",
+ "tips": [
+  "가운데 사진·영상은 직접 올리면 AI 이미지 비용이 들지 않습니다",
+  "전문가 이름·소속은 실제 정보만 입력하세요"
+ ],
+ "count": {
+  "min": 2,
+  "max": 5,
+  "default": 3
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "주제 제목 + 전문가 소개(takeaway에 소속·이름)"
+  },
+  {
+   "archetype": "steps",
+   "hint": "핵심 3가지"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover(takeaway에 전문가 소속·이름이 있으면 그대로), steps 카드(핵심 3가지), 마지막 call_to_action. 전문가 정보가 원문에 없으면 만들지 말 것",
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 4
+ }
+}

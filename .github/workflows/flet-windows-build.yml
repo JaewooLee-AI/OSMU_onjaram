@@ -1,0 +1,278 @@
+name: flet-windows-build
+
+# OSMU_onjaram Flet 데스크톱 앱의 Windows용 .exe를 빌드한다.
+#
+# flet_app/main.py는 sys.path.insert(0, PROJECT_ROOT)로 자기 부모 디렉터리를
+# 경로에 넣어 core/, ai_workers/를 그대로 import한다. `flet build`는 지정한 앱 경로
+# "안"의 파일만 패키징하므로, flet_app/만 놓고 빌드하면 그 바깥의 두 패키지가
+# 통째로 빠져 실행 즉시 ImportError가 난다. 그래서 빌드 직전에 오늘의 저장소
+# 구조를 그대로 복제한 stage/ 디렉터리(core/, ai_workers/, flet_app/를 형제로
+# 나란히)를 만든다. (Streamlit 시절의 최상위 simulators/ 패키지는 삭제됐다 —
+# 시뮬레이터는 이제 flet_app/simulators/ 하나뿐이다.)
+#
+# `flet build`는 앱 경로 "루트"에 진입 스크립트가 직접 있어야 한다(--module-name은
+# 하위 디렉터리를 가리키는 점(.) 표기를 지원하지 않는다 — 첫 시도에서
+# "flet_app.py not found in the root" 에러로 확인됨). 그래서 flet_app/main.py를
+# stage/main.py로도 복사해 루트에 둔다. 그 파일의 sys.path.insert(parent.parent)
+# 계산은 이 위치에서는 안 맞는 경로를 가리키지만 해가 되지는 않는다 — Python이
+# 실행 스크립트의 디렉터리(stage/)를 기본으로 sys.path에 넣어주므로 core/,
+# ai_workers/, flet_app/이 어차피 stage/의 형제로 이미 올바르게
+# 잡힌다. 소스 코드는 손대지 않는다: git의 flet_app/main.py는 그대로 두고,
+# 빌드 스테이징 단계에서만 복사본을 하나 더 둔다.
+
+on:
+  push:
+    paths:
+      - "flet_app/**"
+      - "core/**"
+      - "ai_workers/**"
+      - "cards/**"
+      - "installer/**"
+      - ".github/workflows/flet-windows-build.yml"
+  workflow_dispatch:
+
+# 릴리스 생성(아래 Publish GitHub Release 스텝)에 필요한 권한.
+permissions:
+  contents: write
+
+# 같은 브랜치에 연달아 푸시하면 이전 빌드는 취소하고 최신 커밋만 배포한다.
+concurrency:
+  group: flet-windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 없으면 flet build의 rich-console 진행 표시가 체크마크 이모지를 Windows
+  # 러너 기본 cp1252 콘솔 코드페이지로 출력하려다 UnicodeEncodeError로
+  # 빌드가 시작하기도 전에 죽는다 (spike에서 이미 확인됨).
+  PYTHONUTF8: "1"
+  FLET_CLI_NO_RICH_OUTPUT: "1"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        # flet_app/pyproject.toml을 pip install하지 않고 의존성을 그대로
+        # 나열한다 — 그 파일은 정식 패키징 레이아웃(빌드 백엔드 지정 등)이
+        # 아니라서 `pip install .`이 실패할 위험이 있다 (spike와 같은 근거).
+        #
+        # flet은 버전을 고정한다. 2026-09-30 flet 1.0.3이 PyPI에 먼저 올라오고
+        # flet-cli 1.0.3은 아직 없어서, `flet build`가 같은 버전의 CLI를 설치하지
+        # 못해 빌드가 실패했다. 올릴 때는 flet·flet-cli·flet-desktop이 모두 그
+        # 버전으로 올라와 있는지 PyPI에서 확인하고 바꾼다.
+        run: |
+          python -m pip install --upgrade pip
+          pip install flet==1.0.2 python-dotenv cryptography openai anthropic google-genai `
+            requests beautifulsoup4 feedparser playwright pyperclip Pillow pywin32
+
+      - name: Download Playwright's Chromium fallback + driver
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: "0"
+        run: playwright install chromium
+
+      - name: Diagnostic - does ai_workers.naver_publisher.launch_browser() work here?
+        # 지인 PC(Chrome 이미 설치됨, 실전 사용 중)에서 네이버
+        # 로그인 버튼을 눌러도 반응이 없었다는 제보 때문에 추가한 스텝이다.
+        # 실제 게시 기능이 쓰는 함수를 그대로 호출해, 이 빌드가 참조하는 것과
+        # 똑같은 site-packages(방금 설치한 playwright)에서 Chrome이 실제로
+        # 뜨는지 exe 빌드 전에 확인한다 — exe를 이 러너에서 실행해볼 수는
+        # 없지만(Flet 창 자체가 이 러너에서 안 뜨는 건 이전에 이미 확인됨),
+        # 번들될 의존성 집합이 Chrome을 띄울 수 있는지는 이걸로 미리 걸러낸다.
+        shell: bash
+        run: |
+          python - <<'PYEOF'
+          import sys
+          sys.path.insert(0, ".")
+          from ai_workers.naver_publisher import launch_browser
+          from playwright.sync_api import sync_playwright
+
+          with sync_playwright() as p:
+              browser = launch_browser(p, headless=False)
+              page = browser.new_page()
+              page.set_content("<title>diag-ok</title>")
+              title = page.title()
+              browser.close()
+
+          assert title == "diag-ok", f"unexpected title: {title!r}"
+          print("Playwright Chrome launch OK via launch_browser()")
+          PYEOF
+
+      - name: Stage project root for flet build
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path stage | Out-Null
+          Copy-Item -Recurse -Path core, ai_workers, cards, flet_app -Destination stage
+          Copy-Item -Path flet_app/pyproject.toml -Destination stage/pyproject.toml
+          Copy-Item -Path flet_app/main.py -Destination stage/main.py
+          # flet build는 앱 경로의 assets/icon.png를 exe·창 아이콘으로 쓴다 (온자람 OSMU 아이콘).
+          Copy-Item -Recurse -Path flet_app/assets -Destination stage/assets
+          Write-Host "----- stage/ 트리 -----"
+          Get-ChildItem -Recurse stage | Select-Object -First 80 FullName | Format-Table -AutoSize
+
+      - name: flet build windows
+        run: flet build windows stage --yes --verbose
+
+      - name: Inspect build (exe name, app folder, version)
+        id: meta
+        shell: pwsh
+        run: |
+          $out = "stage/build/windows"
+          # flet build가 만든 실행 파일 이름(프로젝트 이름에서 정해짐)을 그대로 쓴다
+          $exes = @(Get-ChildItem $out -Filter *.exe -File)
+          if ($exes.Count -ne 1) { throw "stage/build/windows에 실행 파일이 1개가 아닙니다: $($exes.Name -join ', ')" }
+          # 앱 코드는 exe 옆 app 폴더에 들어간다(serious_python). 그 안에 data/가 있으면 core/db.py의
+          # 데이터 폴더 규칙이 흔들리므로 여기서 막는다 — 데이터는 항상 %APPDATA%\OSMU_ONJARAM.
+          if (-not (Test-Path "$out/app")) { throw "app 폴더가 없습니다 — 빌드 구조가 바뀌었는지 확인하세요." }
+          if (Test-Path "$out/app/data") { throw "app/data 폴더가 생겼습니다 — 데이터 폴더 규칙(core/db.py)을 다시 확인하세요." }
+          Get-ChildItem $out | Select-Object Name | Format-Table -AutoSize
+          $version = "0.1.${{ github.run_number }}"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "exe=$($exes[0].Name)" >> $env:GITHUB_OUTPUT
+          Write-Host "version=$version exe=$($exes[0].Name)"
+
+      # 쇼츠 영상(cards/shorts_renderer.py)이 쓰는 FFmpeg를 앱에 동봉한다 — 설계·라이선스: docs/FFMPEG_동봉.md.
+      # LGPL 빌드를 쓰므로 libx264가 없을 수 있고, 그 경우 cards/ffmpeg_tools.py가 libopenh264 → h264_mf 순으로 고른다.
+      # 이 스텝은 인코더가 하나도 없거나 시험 인코딩이 실패하면 빌드를 멈춘다. 처음 실행하는 CI에서 URL·구조를 확인해야 한다.
+      - name: Bundle FFmpeg (LGPL build) into app/cards/bin
+        shell: pwsh
+        env:
+          FFMPEG_URL: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip
+        run: |
+          $out = "stage/build/windows"
+          $bin = "$out/app/cards/bin"
+          if (-not (Test-Path "$out/app/cards")) { throw "app/cards 폴더가 없습니다 — cards/ 패키지가 빌드에 들어갔는지 확인하세요." }
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          Invoke-WebRequest -Uri $env:FFMPEG_URL -OutFile ffmpeg.zip
+          Write-Host ("FFmpeg zip SHA256 = " + (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash)
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_x
+          $root = Get-ChildItem ffmpeg_x -Directory | Select-Object -First 1
+          Copy-Item "$($root.FullName)/bin/ffmpeg.exe", "$($root.FullName)/bin/ffprobe.exe" -Destination $bin
+          Get-ChildItem "$($root.FullName)" -File | Where-Object { $_.Name -match 'LICENSE|README|COPYING' } | Copy-Item -Destination $bin
+          & "$bin/ffmpeg.exe" -hide_banner -version | Select-Object -First 3
+          $enc = & "$bin/ffmpeg.exe" -hide_banner -encoders
+          $name = @('libx264','libopenh264','h264_mf') | Where-Object { $enc -match "\b$_\b" } | Select-Object -First 1
+          if (-not $name) { throw "H.264 인코더(libx264/libopenh264/h264_mf)가 없는 FFmpeg 빌드입니다." }
+          Write-Host "H.264 encoder = $name"
+          & "$bin/ffmpeg.exe" -y -v error -f lavfi -i color=c=black:s=320x240:d=1 -c:v $name "$env:RUNNER_TEMP/enc_test.mp4"
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$env:RUNNER_TEMP/enc_test.mp4")) { throw "시험 인코딩 실패($name)." }
+
+      - name: Make installer icon (.ico) from flet_app/assets/icon.png
+        run: python -c "from PIL import Image; Image.open('flet_app/assets/icon.png').save('installer/osmu-onjaram.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
+      - name: Build installer (Inno Setup)
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "Inno Setup 설치 실패" }
+          }
+          $ko = Test-Path (Join-Path (Split-Path $iscc) 'Languages\Korean.isl')
+          Write-Host "설치 화면 언어: $(if ($ko) { '한국어' } else { '영어 (Korean.isl 없음)' })"
+          & $iscc "/DAppVersion=${{ steps.meta.outputs.version }}" "/DAppExe=${{ steps.meta.outputs.exe }}" `
+            "/DSourceDir=$PWD\stage\build\windows" "/DOutputDir=$PWD\dist" "/DIconFile=$PWD\installer\osmu-onjaram.ico" `
+            installer\osmu-onjaram.iss
+          if ($LASTEXITCODE -ne 0) { throw "설치 프로그램 만들기 실패 (ISCC exit $LASTEXITCODE)" }
+
+      - name: Test install, reinstall, uninstall
+        # 러너에서 앱 창은 띄울 수 없으므로(이전에 확인됨) 설치 프로그램 동작만 시험한다:
+        # Program Files 설치·바탕화면 아이콘 → 재설치 때 옛 파일 정리·아이콘/제거 항목 1개 → 제거.
+        # 사용자 데이터 폴더(%APPDATA%\OSMU_ONJARAM)는 세 단계 모두에서 그대로 남아야 한다.
+        shell: pwsh
+        run: |
+          $setup = "dist\OSMU-Onjaram-Setup-${{ steps.meta.outputs.version }}.exe"
+          $dir = "$env:ProgramFiles\OSMU Onjaram"
+          $exe = Join-Path $dir "${{ steps.meta.outputs.exe }}"
+          $desktop = "$env:PUBLIC\Desktop"
+          $userData = Join-Path $env:APPDATA 'OSMU_ONJARAM'
+          $marker = Join-Path $userData 'installer-test-marker.txt'
+          function Run-Setup($path, $log) {
+            $p = Start-Process $path -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=$log" -Wait -PassThru
+            if ($p.ExitCode -ne 0) { Get-Content $log -ErrorAction SilentlyContinue | Select-Object -Last 40; throw "$path 실패 (exit $($p.ExitCode))" }
+          }
+          function Desktop-Links { @(Get-ChildItem $desktop -Filter *.lnk -ErrorAction SilentlyContinue) }
+          function Check-UserData($when) { if (-not (Test-Path $marker)) { throw "$when 뒤 사용자 데이터 폴더가 지워졌습니다: $userData" } }
+
+          New-Item -ItemType File -Path $marker -Force | Out-Null
+
+          # 1) 처음 설치: Program Files에 실행 파일, 바탕화면에 아이콘
+          $before = (Desktop-Links).Count
+          Run-Setup $setup "$PWD\install1.log"
+          if (-not (Test-Path $exe)) { throw "1차 설치 후 실행 파일이 없습니다: $exe" }
+          if ((Desktop-Links).Count -ne $before + 1) { throw "바탕화면 아이콘이 만들어지지 않았습니다" }
+          Check-UserData '1차 설치'
+          Write-Host "1차 설치 OK: $exe"
+
+          # 2) 재설치(업데이트): 옛 버전 파일이 남지 않고, 아이콘·제거 항목이 중복되지 않아야 한다
+          $stale = @(
+            (Join-Path $dir 'site-packages\old_removed_pkg\__init__.pyc'),
+            (Join-Path $dir 'app\old_removed_module.py'),
+            (Join-Path $dir 'old_removed.dll')
+          )
+          foreach ($f in $stale) { New-Item -ItemType File -Path $f -Force | Out-Null }
+          Run-Setup $setup "$PWD\install2.log"
+          if (-not (Test-Path $exe)) { throw "재설치 후 실행 파일이 없습니다" }
+          foreach ($f in $stale) { if (Test-Path $f) { throw "재설치 때 이전 버전 파일이 남았습니다: $f" } }
+          if (-not (Test-Path (Join-Path $dir 'unins000.exe'))) { throw "재설치 후 제거 프로그램이 없습니다" }
+          if ((Desktop-Links).Count -ne $before + 1) { throw "재설치 후 바탕화면 아이콘 수가 맞지 않습니다" }
+          $entries = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
+            Where-Object { $_.PSChildName -like '*34EEB406-6A85-453A-B114-1F82B055A174*' })
+          if ($entries.Count -ne 1) { throw "'설치된 앱' 목록 항목이 1개가 아닙니다: $($entries.Count)" }
+          Check-UserData '재설치'
+          Write-Host "재설치 OK (옛 파일 정리, 아이콘·제거 항목 1개, 사용자 데이터 유지)"
+
+          # 3) 제거: 설치 폴더와 바탕화면 아이콘은 사라지고, 사용자 데이터는 남아야 한다
+          Run-Setup (Join-Path $dir 'unins000.exe') "$PWD\uninstall.log"
+          for ($i = 0; $i -lt 30 -and (Test-Path $dir); $i++) { Start-Sleep -Seconds 1 }
+          if (Test-Path $dir) { throw "제거 후 설치 폴더가 남았습니다" }
+          if ((Desktop-Links).Count -ne $before) { throw "제거 후 바탕화면 아이콘이 남았습니다" }
+          Check-UserData '제거'
+          Write-Host "제거 OK (사용자 데이터 유지)"
+
+      - name: Zip installer
+        # 카카오톡 등으로 .exe를 직접 보내면 막히거나 경고가 붙으므로 setup.exe 하나를 zip으로 감싼다.
+        shell: pwsh
+        run: |
+          $name = "OSMU-Onjaram-Setup-${{ steps.meta.outputs.version }}"
+          Compress-Archive -Path "dist\$name.exe" -DestinationPath "$name.zip"
+          "SETUP_ZIP=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: osmu-onjaram-setup
+          path: OSMU-Onjaram-Setup-*.zip
+          if-no-files-found: error
+
+      - name: Upload build folder artifact (for debugging)
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: osmu-onjaram-windows-build
+          path: stage/build/windows
+          if-no-files-found: warn
+
+      # --- 자동 배포 ---------------------------------------------------------
+      # main에 푸시될 때마다 setup.exe를 담은 zip 하나를 GitHub Releases에 올린다.
+      # Actions 아티팩트는 로그인해야 받을 수 있고 90일 뒤 사라지지만, 릴리스는 저장소의
+      # Releases 페이지에서 누구나 바로 내려받을 수 있다. 담당자는 항상
+      # https://github.com/<owner>/<repo>/releases/latest 에서 받으면 된다.
+      - name: Publish GitHub Release
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="v${{ steps.meta.outputs.version }}"
+          gh release create "$VERSION" "$SETUP_ZIP" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "온자람 OSMU $VERSION" \
+            --notes "커밋 ${GITHUB_SHA::7} 자동 빌드. zip을 풀고 안의 OSMU-Onjaram-Setup-….exe를 실행하면 설치됩니다(C:\Program Files\OSMU Onjaram, 바탕화면·시작 메뉴 아이콘 생성). 이전 버전이 있으면 같은 자리에 업데이트되고, 브랜드 킷·글·API 키·네이버 로그인은 그대로 남습니다. 예전 zip(폴더째 실행) 버전을 쓰던 PC는 그 폴더를 지우고 설치하면 됩니다. 처음 설치한 PC는 ⚙️ 설정에서 LLM API 키를 등록해야 합니다. 서명되지 않은 설치 파일이라 Windows SmartScreen 경고가 나오면 '추가 정보 → 실행'을 누르세요." \
+            --latest

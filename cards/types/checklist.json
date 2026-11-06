@@ -1,0 +1,55 @@
+{
+ "id": "checklist",
+ "name": "마음 체크리스트형",
+ "status": "available",
+ "desc": "공감 체크 항목 → 해석 → 작은 실천 (진단이 아닙니다)",
+ "fit": "독자가 자신의 상태를 살펴보도록 돕는 원고",
+ "template": "【주제 한 줄 — 예: 요즘 이런 마음, 있으신가요?】\n체크 1: 【…】\n체크 2: 【…】\n체크 3: 【…】\n작은 실천: 【…】",
+ "tips": [
+  "항목은 3~5개",
+  "진단·판정 표현 금지 — 마지막에 '진단이 아닙니다' 안내가 자동으로 붙습니다"
+ ],
+ "count": {
+  "min": 5,
+  "max": 8,
+  "default": 6
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "질문형 헤드라인"
+  },
+  {
+   "archetype": "checklist",
+   "repeat": true,
+   "hint": "체크 항목 3개씩"
+  },
+  {
+   "archetype": "body",
+   "hint": "왜 그런 마음이 드는지(자책 덜기)"
+  },
+  {
+   "archetype": "steps",
+   "hint": "작은 실천 3가지"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover(질문형), checklist 카드(항목 3개씩, 1~2장), 해석 body 1장, 작은 실천 steps 1장, 마지막 call_to_action. 마지막 카드의 takeaway나 body에 '이 체크리스트는 진단이 아닙니다' 안내를 반드시 넣을 것. 특정 질환으로 단정하지 말 것",
+ "fit_check": {
+  "need_any": [
+   "체크",
+   "해당",
+   "느끼",
+   "있으신가요"
+  ],
+  "min_hits": 1
+ },
+ "disclaimer": "이 체크리스트는 진단이 아니며, 어려움이 이어지면 전문가와 상담해 보세요.",
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 6
+ }
+}

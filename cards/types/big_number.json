@@ -1,0 +1,38 @@
+{
+ "id": "big_number",
+ "name": "빅넘버·인포그래픽형",
+ "status": "available",
+ "desc": "핵심 수치를 크게 보여 주는 구성",
+ "fit": "원문에 실제 수치가 2개 이상 있는 원고",
+ "template": "【주제 한 줄】\n핵심 수치 1: 【숫자+단위】 — 【무엇의 수치인지】\n핵심 수치 2: 【숫자+단위】 — 【무엇의 수치인지】\n참고: 【기간·범위·조건】",
+ "tips": [
+  "수치는 단위와 함께",
+  "원문에 실제 있는 수치만 씁니다(없는 숫자는 만들지 않습니다)"
+ ],
+ "count": {
+  "min": 3,
+  "max": 7,
+  "default": 4
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "주제 제목"
+  },
+  {
+   "archetype": "big_number",
+   "repeat": true,
+   "hint": "원문의 수치 하나씩(stat_value에 원문 그대로)"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover, 원문에 있는 수치마다 big_number 카드(stat_value에 원문 수치 그대로, stat_label에 한 줄 설명), 마지막 call_to_action. 원문에 없는 숫자는 만들지 말 것",
+ "min_numbers": 2,
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 5
+ }
+}

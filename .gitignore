@@ -1,0 +1,35 @@
+# 로컬 데이터: DB, 업로드 사진, 암호화 마스터 키, 네이버 세션 쿠키.
+# 특히 .master_key 와 naver_state.json 은 절대 커밋하지 마세요.
+data/
+
+# 회사 원본 문서(제품제안서·사업신청서·교안 PDF). 여기서 뽑아 정리한 브랜드 킷은
+# core/brand_seed.py 에 텍스트로 들어 있으므로, 원본 없이도 앱은 그대로 동작합니다.
+company_info/
+company_info*.zip
+
+# 컨설팅 보고서·진단 문서·운영 매뉴얼 등 회사 내부 자료. 코드와 무관하고
+# 공개 저장소에 올릴 이유가 없습니다.
+etc/
+
+.venv/
+__pycache__/
+spike_flet/build/
+flet_app/build/
+/stage/
+*.pyc
+.env
+.DS_Store
+.playwright-mcp/
+*.swp
+osmu-dashboard.png
+
+# 설치 프로그램 빌드 산출물 (워크플로가 flet_app/assets/icon.png에서 .ico를 만들고 dist/에 setup.exe를 만듭니다)
+installer/*.ico
+/dist/
+
+# 📦 데이터 옮기기 파일 — 브랜드 킷·회사 설정(평문)과 암호화된 API 키가 들어 있음
+*.osmu
+
+# 회사 원본 문서(워드·사진). 공개 저장소에는 올리지 않습니다.
+info/
+.pytest_cache/

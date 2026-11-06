@@ -1,0 +1,322 @@
+"""파이프라인 대시보드.
+
+원본의 `core/theme.py` HTML(`stat_card`/`status_chip`)이 아니라, 브랜드 킷
+화면부터 써온 `flet_app/theme.py`의 네이티브 버전을 그대로 재사용한다.
+
+통계 카드를 누르면 그 상태의 글만 아래 상태판에 남기고(같은 카드를 다시 누르면 전체),
+글 카드를 누르면 워크벤치에서 그 글을 연다. 게시 완료 글은 저장된 네이버 글 주소가
+있으면 그 주소를 브라우저로 연다.
+"""
+from __future__ import annotations
+
+import flet as ft
+
+from core import repo, setup_check, storage
+
+from flet_app.components.collapsible import collapsible
+from flet_app.state import AppState
+from flet_app.theme import BRAND_COLORS, fs, stat_card, status_chip
+
+BOARD_COLUMNS = [
+    ("awaiting_media", "소재 대기"),
+    ("processing", "생성 중"),
+    ("draft", "초안 완료"),
+    ("ready_to_publish", "게시 대기"),
+    ("published", "게시 완료"),
+]
+
+# 통계 카드 → 상태판에 남길 상태. 'queued'(대기열)는 '생성 중' 칸에 같이 보입니다.
+CARD_FILTERS = {
+    "active": ("awaiting_media", "queued", "processing"),
+    "draft": ("draft",),
+    "published": ("published",),
+}
+_COLUMN_STATUSES = {"processing": ("queued", "processing")}
+
+
+def _column_statuses(status_key: str) -> tuple:
+    return _COLUMN_STATUSES.get(status_key, (status_key,))
+
+
+def _setup_panel(scale: float) -> ft.Control:
+    """시작 점검: 필수 항목이 모두 준비되면 한 줄, 아니면 빠진 것과 해결 방법을 보여 준다(선택 항목은 접어 둔다)."""
+    items = setup_check.items()
+    missing = [i for i in items if i["required"] and not i["ok"]]
+    optional = [i for i in items if not i["required"]]
+    rows: list[ft.Control] = []
+    for i in missing:
+        rows.append(ft.Text(f"❌ {i['label']} — {i['hint']}", size=fs(12, scale), color="#B3261E"))
+    head = ("⚠️ 먼저 준비할 것이 있습니다" if missing else "✅ 필수 준비 완료")
+    detail = [ft.Text(f"{'✅' if i['ok'] else '▫️'} {i['label']}" + ("" if i["ok"] else f" — {i['hint']}"),
+                      size=fs(11, scale), color=BRAND_COLORS["text_muted"]) for i in optional]
+    content = ft.Column([ft.Text(head, size=fs(12, scale), weight=ft.FontWeight.BOLD), *rows,
+                         *collapsible("선택 기능 상태 (없어도 글쓰기는 됩니다)", ft.Column(detail, spacing=4))], spacing=4)
+    return ft.Container(content=content, bgcolor="#FDECEA" if missing else "#EEF6EF", padding=10, border_radius=8)
+
+
+def _job_card(job: dict, scale: float, on_open, on_work=None, on_studio=None) -> ft.Control:
+    icon = "📰" if job.get("source_type") == "news" else "✍️"
+    title = job.get("title") or job.get("source_url") or job["id"][:8]
+    photos = len(job.get("storage_file_paths") or [])
+    published = job.get("status") == "published"
+    meta = f"{job.get('created_at', '')} · 사진 {photos}장"
+    hint = ("🔗 누르면 네이버 글이 열립니다" if job.get("published_url") else "🔗 글 주소 없음 — 누르면 워크벤치") \
+        if published else "누르면 워크벤치에서 열립니다"
+
+    async def on_click(e: ft.Event, job=job) -> None:
+        await on_open(job)
+
+    # 게시 완료 글은 url=로 열어 브라우저가 클릭을 직접 처리하게 한다(핸들러에서 launch_url을 부르면 팝업 차단에 걸릴 수 있음).
+    direct_url = job.get("published_url") if published else None
+
+    # 게시 완료 글은 카드를 누르면 네이버 글이 열리므로, 작업(글·카드뉴스·쇼츠)을 다시 여는 길을 따로 둔다.
+    links = []
+    if on_work and on_studio:
+        links = [ft.Row([
+            ft.TextButton("✍️ 작업 열기", on_click=lambda e, j=job: on_work(j), style=ft.ButtonStyle(padding=ft.Padding(4, 0, 4, 0))),
+            ft.TextButton("🃏 카드·쇼츠", on_click=lambda e, j=job: on_studio(j), style=ft.ButtonStyle(padding=ft.Padding(4, 0, 4, 0))),
+        ], spacing=0)]
+
+    return ft.Container(
+        content=ft.Column([
+            ft.Text(f"{icon} {title}", size=fs(12, scale), weight=ft.FontWeight.BOLD, max_lines=2,
+                    overflow=ft.TextOverflow.ELLIPSIS, color=BRAND_COLORS["primary"]),
+            ft.Text(meta, size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+            status_chip(job["status"], scale),
+            *links,
+        ], spacing=4),
+        bgcolor=ft.Colors.WHITE, border_radius=8, padding=10,
+        border=ft.Border.all(1, "#14000000"),
+        ink=True, tooltip=hint,
+        **({"url": direct_url} if direct_url else {"on_click": on_click}),
+    )
+
+
+def _build_board(campaigns: list[dict], scale: float, on_open, active_filter: str | None, on_work=None, on_studio=None) -> ft.Control:
+    allowed = set(CARD_FILTERS[active_filter]) if active_filter else None
+    columns: list[ft.Control] = []
+    for status_key, column_title in BOARD_COLUMNS:
+        statuses = _column_statuses(status_key)
+        if allowed is not None and not (set(statuses) & allowed):
+            continue
+        matching = [c for c in campaigns if c["status"] in statuses]
+        col_children: list[ft.Control] = [
+            ft.Text(f"{column_title} ({len(matching)})", size=fs(13, scale), weight=ft.FontWeight.BOLD),
+        ]
+        if not matching:
+            col_children.append(ft.Text("항목 없음", size=fs(11, scale), color=BRAND_COLORS["text_muted"]))
+        col_children += [_job_card(j, scale, on_open, on_work if status_key == "published" else None,
+                                   on_studio if status_key == "published" else None) for j in matching[:12]]
+        if len(matching) > 12:
+            col_children.append(ft.Text(f"외 {len(matching) - 12}건", size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
+        columns.append(ft.Container(content=ft.Column(col_children, spacing=8), expand=True))
+    return ft.Row(columns, spacing=12, vertical_alignment=ft.CrossAxisAlignment.START)
+
+
+def _clickable_card(card: ft.Control, key: str, active_filter: str | None, on_filter) -> ft.Control:
+    selected = key == active_filter
+
+    def on_click(e: ft.Event) -> None:
+        on_filter(None if selected else key)
+
+    return ft.Container(
+        content=card, expand=True, ink=True, on_click=on_click, border_radius=10,
+        border=ft.Border.all(2, BRAND_COLORS["secondary"]) if selected else None,
+        tooltip="다시 누르면 전체 보기" if selected else "누르면 이 상태의 글만 봅니다",
+    )
+
+
+def _build_failed_section(campaigns: list[dict], scale: float, refresh) -> list[ft.Control]:
+    failed = [c for c in campaigns if c["status"] == "failed"]
+    if not failed:
+        return []
+
+    out: list[ft.Control] = [ft.Divider(), ft.Text("⚠️ 실패한 작업", size=fs(16, scale), weight=ft.FontWeight.BOLD)]
+    for job in failed:
+        job_id = job["id"]
+
+        def on_retry(e: ft.Event, job_id: str = job_id) -> None:
+            repo.update_campaign(job_id, status="awaiting_media", publish_error=None)
+            refresh(True)
+
+        def on_delete(e: ft.Event, job_id: str = job_id) -> None:
+            repo.delete_campaign(job_id)
+            refresh(True)
+
+        out.append(ft.Container(
+            content=ft.Column([
+                ft.Text(job.get("title") or job.get("source_url") or job["id"][:8], weight=ft.FontWeight.BOLD, size=fs(13, scale)),
+                ft.Text(job.get("publish_error") or "원인 미기록", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+                ft.Row([
+                    ft.OutlinedButton("🔁 다시 시도", on_click=on_retry),
+                    ft.OutlinedButton("🗑️ 삭제", on_click=on_delete),
+                ], spacing=8),
+            ], spacing=6),
+            border=ft.Border.all(1, "#E4DCC8"), border_radius=10, padding=12,
+        ))
+    return out
+
+
+def _build_reset_section(page: ft.Page, scale: float, campaigns: list[dict], file_count: int, total_bytes: int, refresh) -> list[ft.Control]:
+    confirm = {"value": False}
+    action_box = ft.Container()
+
+    def build_actions() -> ft.Control:
+        if not confirm["value"]:
+            def on_ask(e: ft.Event) -> None:
+                confirm["value"] = True
+                action_box.content = build_actions()
+                action_box.update()
+
+            return ft.FilledButton("🗑️ 콘텐츠 초기화", on_click=on_ask)
+
+        def on_confirm(e: ft.Event) -> None:
+            removed = repo.reset_generated_content()
+            files_removed = storage.clear_all()
+            confirm["value"] = False
+            refresh(True)
+            page.show_dialog(ft.SnackBar(ft.Text(
+                f"초기화했습니다 — 캠페인 {removed['campaigns']}건, 사진 {files_removed}장, "
+                f"제목 이력 {removed['titles']}건 삭제됨."
+            )))
+
+        def on_cancel(e: ft.Event) -> None:
+            confirm["value"] = False
+            action_box.content = build_actions()
+            action_box.update()
+
+        return ft.Column([
+            ft.Container(
+                content=ft.Text(
+                    "정말 삭제할까요? 되돌릴 수 없습니다. 위에 적힌 캠페인·사진·제목 이력이 전부 사라집니다.",
+                    size=fs(12, scale), color="#8A6D3B",
+                ),
+                bgcolor="#FFF6E5", padding=10, border_radius=8,
+            ),
+            ft.Row([
+                ft.FilledButton("네, 초기화합니다", on_click=on_confirm),
+                ft.OutlinedButton("취소", on_click=on_cancel),
+            ], spacing=8),
+        ], spacing=8)
+
+    action_box.content = build_actions()
+
+    body = ft.Column([
+        ft.Text(
+            "워크벤치·뉴스 큐레이션·네이버 게시로 만들어진 것만 지웁니다 — 캠페인(초안·인스타/X/쇼츠·"
+            "컴플라이언스 리포트), 업로드한 사진, 제목 반복 방지 이력. 브랜드 킷, API 키, LLM 설정, "
+            "키워드·이미지 분석 캐시는 그대로 남습니다.",
+            size=fs(11, scale), color=BRAND_COLORS["text_muted"],
+        ),
+        ft.Text(
+            f"- 캠페인 {len(campaigns)}건\n"
+            f"- 업로드 사진 {file_count}장 ({total_bytes / 1_048_576:.1f}MB)\n"
+            f"- 제목 이력 {repo.title_history_count()}건",
+            size=fs(11, scale),
+        ),
+        action_box,
+    ], spacing=8)
+
+    return [ft.Divider()] + collapsible("⚠️ 콘텐츠 초기화", body)
+
+
+def _won(value: float) -> str:
+    return f"{value:,.0f}원"
+
+
+def _build_body(page: ft.Page, scale: float, refresh, state: AppState, view: dict) -> ft.Control:
+    campaigns = repo.list_campaigns()
+    counts = repo.campaign_status_counts()
+    usage = repo.usage_totals()
+    month = repo.cost_this_month()
+    file_count, total_bytes = storage.storage_usage()
+
+    active = counts.get("awaiting_media", 0) + counts.get("queued", 0) + counts.get("processing", 0)
+    drafts = counts.get("draft", 0)
+    published = counts.get("published", 0)
+    saved = usage["saved_tokens"]
+    spent = usage["input_tokens"] + usage["output_tokens"]
+    ratio = f"절감률 {saved / (saved + spent) * 100:.0f}%" if (saved + spent) else "아직 호출 없음"
+    saved_money = repo.cost_all_time()["saved_cost_krw"]
+    if saved_money:
+        ratio += f" · 약 {_won(saved_money)} 절감(추정)"
+
+    def on_refresh(e: ft.Event) -> None:
+        refresh(True)
+
+    def on_filter(key: str | None) -> None:
+        view["filter"] = key
+        refresh(True)
+
+    async def open_job(job: dict) -> None:
+        if job.get("status") == "published" and job.get("published_url"):
+            await ft.UrlLauncher().launch_url(job["published_url"])
+            return
+        open_work(job)
+
+    def open_work(job: dict) -> None:
+        state.pending_workbench_campaign_id = job["id"]
+        if state.navigate_to_workbench:
+            state.navigate_to_workbench()
+
+    def open_studio(job: dict) -> None:
+        state.studio_campaign_id = job["id"]
+        if state.navigate_to_studio:
+            state.navigate_to_studio()
+
+    cost_note = f"{month['calls']}회 호출"
+    if month["unpriced_calls"]:
+        cost_note += f" · 단가 미등록 {month['unpriced_calls']}회 제외"
+    controls: list[ft.Control] = [
+        ft.Text("파이프라인 대시보드", size=fs(24, scale), weight=ft.FontWeight.BOLD),
+        ft.Text(
+            "소재 수집 → 초안 생성 → 게시까지의 진행 상황과, 이번까지 절약된 토큰을 한눈에 봅니다. "
+            "카드를 누르면 그 상태의 글만, 글을 누르면 워크벤치에서 그 글이 열립니다.",
+            size=fs(12, scale), color=BRAND_COLORS["text_muted"],
+        ),
+    ]
+    controls.append(_setup_panel(scale))
+    warning = repo.budget_message()
+    if warning:
+        controls.append(ft.Container(
+            content=ft.Text(warning, size=fs(12, scale), color="#8A6D3B"),
+            bgcolor="#FFF6E5", padding=10, border_radius=8,
+        ))
+    active_filter = view.get("filter")
+    controls += [
+        ft.Row([
+            _clickable_card(stat_card("작업 중", str(active), "소재 대기 + 생성 중", scale), "active", active_filter, on_filter),
+            _clickable_card(stat_card("초안 완료", str(drafts), "검수 후 게시 가능", scale), "draft", active_filter, on_filter),
+            _clickable_card(stat_card("게시 완료", str(published), f"사진 {file_count}장 · {total_bytes / 1_048_576:.1f}MB", scale),
+                            "published", active_filter, on_filter),
+            ft.Container(content=stat_card("절약된 토큰", f"{saved:,}", ratio, scale), expand=True),
+            ft.Container(content=stat_card("이번 달 AI 비용(추정)", _won(month["cost_krw"]), cost_note, scale), expand=True),
+        ], spacing=12),
+    ]
+    if active_filter:
+        label = {"active": "작업 중", "draft": "초안 완료", "published": "게시 완료"}[active_filter]
+        controls.append(ft.Row([
+            ft.Text(f"🔎 '{label}' 글만 보는 중", size=fs(12, scale), color=BRAND_COLORS["secondary"]),
+            ft.TextButton("전체 보기", on_click=lambda e: on_filter(None)),
+        ]))
+    controls.append(_build_board(campaigns, scale, open_job, active_filter, open_work, open_studio))
+    controls += _build_failed_section(campaigns, scale, refresh)
+    controls += [ft.Divider(), ft.OutlinedButton("🔄 새로고침", on_click=on_refresh)]
+    controls += _build_reset_section(page, scale, campaigns, file_count, total_bytes, refresh)
+
+    return ft.Column(controls, spacing=14, scroll=ft.ScrollMode.AUTO, expand=True)
+
+
+def build(page: ft.Page, state: AppState) -> ft.Control:
+    scale = state.font_scale
+    root = ft.Container(expand=True)
+
+    view: dict = {"filter": None}
+
+    def refresh(live: bool) -> None:
+        root.content = _build_body(page, scale, refresh, state, view)
+        if live:
+            root.update()
+
+    refresh(False)
+    return root

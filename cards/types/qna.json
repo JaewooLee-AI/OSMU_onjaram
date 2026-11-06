@@ -1,0 +1,46 @@
+{
+ "id": "qna",
+ "name": "Q&A형 (자주 묻는 질문)",
+ "status": "available",
+ "desc": "질문과 답을 한 장씩 정리",
+ "fit": "상담에 대해 자주 받는 질문이 있는 원고",
+ "template": "【주제 한 줄 — 예: 상담, 이게 궁금했어요】\nQ1. 【질문】\nA1. 【답】\nQ2. 【질문】\nA2. 【답】",
+ "tips": [
+  "질문은 독자의 말투로",
+  "답에는 치료·효과 보장 표현을 쓰지 않습니다"
+ ],
+ "count": {
+  "min": 4,
+  "max": 8,
+  "default": 5
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "질문을 모은 제목"
+  },
+  {
+   "archetype": "qa",
+   "repeat": true,
+   "hint": "질문 하나와 답 하나"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "tri-2-5-3",
+ "llm_structure": "1장 cover, qa 카드(lead_headline에 질문, body_content에 답 2~3줄), 마지막 call_to_action",
+ "fit_check": {
+  "need_any": [
+   "Q",
+   "질문",
+   "궁금",
+   "?"
+  ],
+  "min_hits": 1
+ },
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 5
+ }
+}

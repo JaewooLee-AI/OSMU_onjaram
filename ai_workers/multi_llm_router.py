@@ -1,0 +1,486 @@
+"""Instantiates the configured LLM vendor client and routes prompts to it.
+
+Ported from OSMU_admin/ai_workers/multi_llm_router.py. Two substantive
+changes for this build:
+
+1. Configuration reads from SQLite (`core.repo`) instead of Supabase.
+2. Every call reports back real token usage from the provider response
+   (OpenAI `usage`, Anthropic `usage`, Gemini `usage_metadata`) into
+   `usage_log`, so the token-minimization work in ai_workers/vision.py is
+   measured rather than assumed. Providers that omit usage fall back to a
+   conservative character-based estimate.
+"""
+from __future__ import annotations
+
+import re
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Iterator, Optional, Tuple
+
+from core import repo
+from core.crypto_utils import decrypt_api_key
+
+VENDORS = {
+    "google": {
+        "label": "Google Gemini",
+        "icon": "✨",
+        "supports_vision": True,
+        "note": "이미지 분석 기본 벤더 — 이미지 토큰 단가가 가장 낮습니다.",
+    },
+    "openai": {
+        "label": "OpenAI",
+        "icon": "🤖",
+        "supports_vision": True,
+    },
+    "anthropic": {
+        "label": "Anthropic",
+        "icon": "🧠",
+        "supports_vision": True,
+    },
+}
+
+# Korean averages roughly 2 characters per token across these tokenizers —
+# only used when a provider doesn't return usage metadata.
+_CHARS_PER_TOKEN = 2.0
+
+
+def normalize_model_name(vendor: str, model_name: str) -> str:
+    """Normalizes common user typos in provider model IDs (e.g. Anthropic uses
+    hyphens in version numbers like `claude-sonnet-5-5`, while users often type
+    `claude-sonnet-5.5` which returns a 404 from the Anthropic API)."""
+    cleaned = (model_name or "").strip()
+    if vendor == "anthropic":
+        cleaned = re.sub(r"(\d)\.(\d)", r"\1-\2", cleaned)
+    return cleaned
+
+
+def vision_capable_vendors() -> list:
+    return [k for k, spec in VENDORS.items() if spec.get("supports_vision")]
+
+
+# 지금 하는 글쓰기가 어느 모델 슬롯(repo.MODEL_SLOTS)을 따르는지. 기본은 "text"이고, 블로그 글 파이프라인은
+# "text_blog"로 바꿔 돌립니다 — 그 안의 모든 호출(스레드 풀 포함)이 같은 슬롯을 봅니다.
+_TEXT_SLOT: ContextVar[str] = ContextVar("llm_text_slot", default="text")
+
+
+@contextmanager
+def text_slot(slot: str) -> Iterator[None]:
+    token = _TEXT_SLOT.set(slot)
+    try:
+        yield
+    finally:
+        _TEXT_SLOT.reset(token)
+
+
+def get_configured_vendor(slot: Optional[str] = None) -> str:
+    """글쓰기·검수에 쓸 벤더. ⚙️ 설정 → 모델 등록에서 고른 슬롯의 모델이 정합니다(슬롯이 비어 있으면 예전
+    설정 app_settings.default_generation_vendor). 모든 파이프라인이 벤더를 하드코딩하지 않고 여기서 받으므로,
+    모델을 바꾸는 일은 설정 화면에서 한 번에 끝나고 의도하지 않은 모델로 조용히 대체되지 않습니다."""
+    chosen = repo.resolve_slot_model(slot or _TEXT_SLOT.get())
+    vendor = chosen["vendor"] if chosen else repo.get_app_settings().get("default_generation_vendor")
+    if not vendor:
+        raise RuntimeError("기본 생성 모델이 지정되지 않았습니다. ⚙️ 설정 페이지에서 먼저 지정하세요.")
+
+    setting = repo.get_llm_setting(vendor)
+    if not setting or not setting.get("is_active"):
+        raise RuntimeError(f"지정된 기본 생성 모델('{vendor}')이 비활성 상태이거나 API 키가 등록되어 있지 않습니다.")
+    return vendor
+
+
+def get_vision_vendor() -> str:
+    """Vision can run on a different (cheaper) vendor than the writing model —
+    that separation is itself a cost lever, since captioning is a small,
+    high-volume task while drafting is a large, low-volume one. 슬롯이 비어 있으면
+    기본 글쓰기 모델의 벤더를 따릅니다."""
+    chosen = repo.resolve_slot_model("vision")
+    vendor = chosen["vendor"] if chosen else repo.get_app_settings().get("vision_vendor")
+    if vendor:
+        setting = repo.get_llm_setting(vendor)
+        if setting and setting.get("is_active"):
+            return vendor
+    return get_configured_vendor("text")
+
+
+def test_connection(vendor: str, model_name: str, api_key: str) -> Tuple[bool, str]:
+    """Sends a minimal 'Hello' prompt to verify the key/model combo works."""
+    model_name = normalize_model_name(vendor, model_name)
+    try:
+        if vendor == "openai":
+            from openai import OpenAI
+
+            client = OpenAI(api_key=api_key)
+            client.chat.completions.create(
+                model=model_name,
+                messages=[{"role": "user", "content": "Hello"}],
+                # max_completion_tokens: reasoning models reject max_tokens.
+                max_completion_tokens=16,
+            )
+        elif vendor == "anthropic":
+            from anthropic import Anthropic
+
+            client = Anthropic(api_key=api_key)
+            client.messages.create(
+                model=model_name,
+                max_tokens=5,
+                messages=[{"role": "user", "content": "Hello"}],
+            )
+        elif vendor == "google":
+            # Same request shape as real generation (thinking setting included):
+            # a bare test passed for gemini-3.5-flash-lite while every draft
+            # on it failed, so '연결 정상' has to mean generation works.
+            _call_google(model_name, api_key, "Hello", None, 16)
+        else:
+            return False, f"Unsupported vendor: {vendor}"
+        return True, "연결 정상"
+    except Exception as exc:  # surfaced directly to the admin in the UI
+        import traceback
+
+        traceback.print_exc()  # 화면에는 한 줄만 나오므로 원인 추적용으로 콘솔에도 남긴다
+        return False, str(exc)
+
+
+def load_vendor_config(vendor: str, slot: Optional[str] = None) -> Tuple[str, str]:
+    """(모델 ID, API 키). 모델 ID는 슬롯에 지정한 등록 모델이 정하고, 그 벤더의 모델이 아니면 그 벤더의
+    첫 사용 중 모델, 그것도 없으면 예전 설정(llm_settings.model_name)을 씁니다. 키는 벤더마다 하나입니다."""
+    setting = repo.get_llm_setting(vendor)
+    if not setting:
+        raise RuntimeError(f"'{vendor}' 벤더의 설정이 없습니다. ⚙️ 설정 페이지에서 먼저 등록하세요.")
+    api_key = decrypt_api_key(setting["encrypted_api_key"])
+    slot = slot or _TEXT_SLOT.get()
+    chosen = repo.resolve_slot_model(slot)
+    if chosen and chosen["vendor"] == vendor:
+        model_id = chosen["model_id"]
+    else:
+        need = repo.MODEL_SLOTS.get(slot, ("", "text"))[1]
+        same_vendor = [m for m in repo.list_models(need, include_disabled=False) if m["vendor"] == vendor]
+        model_id = same_vendor[0]["model_id"] if same_vendor else setting["model_name"]
+    return normalize_model_name(vendor, model_id), api_key
+
+
+def _estimate_tokens(text: str) -> int:
+    return int(len(text or "") / _CHARS_PER_TOKEN)
+
+
+class OutputTruncatedError(RuntimeError):
+    """The provider stopped at the output ceiling even after one enlarged retry.
+
+    Raised instead of returning the partial text, because almost every caller
+    here asks the model to reproduce a whole post (draft, revision, SEO
+    rebalance) or a JSON object (audits): a cut-off post saved as if it were
+    finished, or a cut-off JSON object parsed as "no issues", is a worse
+    outcome than a visible failure. `partial` is kept for diagnosis only.
+    """
+
+    def __init__(self, message: str, partial: str = ""):
+        super().__init__(message)
+        self.partial = partial
+
+
+# One retry at this multiple of the caller's ceiling before giving up. The
+# callers' ceilings are sized for typical Korean output (~2 chars/token), and
+# the tokenizers disagree by more than that factor on Korean — a single larger
+# attempt absorbs the variance without letting a runaway response cost more
+# than twice what the caller budgeted.
+_TRUNCATION_RETRY_FACTOR = 2
+
+# Gemini 2.5+/3.x and OpenAI reasoning models spend hidden reasoning tokens out
+# of the same output ceiling as the visible answer. When reasoning can't be
+# switched off (some models reject a zero budget), this much headroom is added
+# on top so the caller's ceiling still bounds the *visible* text.
+_REASONING_HEADROOM = 8192
+
+# Claude 5세대(Sonnet 5·5.5, Opus 5·5.5, Haiku 5.5, Fable, Mythos)는 `thinking`을 빼고 보내면
+# 생각을 켠 채(adaptive) 답하고, Fable·Opus 5.5는 아예 끌 수 없습니다. 생각에 쓴 토큰도
+# max_tokens에서 빠지므로 위와 같은 여유분이 없으면 글이 한도에 걸립니다 — 2026-10-16 실측:
+# Fable 5.1은 한 편 생성 중 18회 호출 중 11회가 한도에 걸려 인스타·X가 비었고, Sonnet 5.5
+# 사진 설명은 300토큰을 전부 생각에 써서 0개였습니다. 글쓰기에 깊은 추론은 필요 없어
+# effort는 medium으로 낮춥니다(시간·비용도 같이 줄어듭니다). 4세대 이하는 그대로 둡니다 —
+# 기본값이 생각 꺼짐이고, Haiku 4.5 등은 effort를 보내면 오류가 납니다.
+_ANTHROPIC_THINKING_MIN_GENERATION = 5
+_ANTHROPIC_EFFORT = "medium"
+
+
+def anthropic_request_options(model_name: str, max_tokens: int) -> dict:
+    """`max_tokens` (and `output_config`) for a Claude request — with room for
+    thinking on the models that think by default, unchanged on older ones."""
+    match = re.match(r"claude-[a-z]+-(\d+)", (model_name or "").lower())
+    if match and int(match.group(1)) >= _ANTHROPIC_THINKING_MIN_GENERATION:
+        return {"max_tokens": max_tokens + _REASONING_HEADROOM, "output_config": {"effort": _ANTHROPIC_EFFORT}}
+    return {"max_tokens": max_tokens}
+
+
+def raise_if_refused(res) -> None:
+    """Claude's safety classifiers can stop a reply part-way (stop_reason
+    'refusal'). The text up to that point looks like a finished answer, so it
+    is raised instead of returned — a cut-off draft must never be saved."""
+    if getattr(res, "stop_reason", None) == "refusal":
+        category = getattr(getattr(res, "stop_details", None), "category", None)
+        raise RuntimeError(
+            f"Claude가 안전 정책으로 응답을 중단했습니다({category or '사유 미상'}). "
+            "중단된 글은 저장하지 않았습니다. 메모 표현을 바꿔 다시 시도해 주세요."
+        )
+
+# Transient-error retries for Gemini. The OpenAI and Anthropic SDKs already
+# retry 429/5xx (and Anthropic's 529 overloaded) twice by default; google-genai
+# retries *nothing* unless retry_options is set. A "503 UNAVAILABLE — high
+# demand" rejection therefore failed the Instagram caption outright while the
+# same request a few seconds later would have gone through. The SDK's own
+# default status list (408/429/500/502/503/504) is used; waits grow
+# 2s → 4s → 8s (+jitter, capped at 20s), about 15s at worst before giving up.
+_GOOGLE_RETRY_ATTEMPTS = 4  # including the first call
+_GOOGLE_RETRY_INITIAL_DELAY = 2.0
+_GOOGLE_RETRY_MAX_DELAY = 20.0
+
+
+def google_client(api_key: str):
+    """A google-genai client that retries transient server errors. Every
+    Gemini call site (text, embeddings, vision) builds its client here."""
+    from google import genai
+    from google.genai import types
+
+    return genai.Client(
+        api_key=api_key,
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(
+                attempts=_GOOGLE_RETRY_ATTEMPTS,
+                initial_delay=_GOOGLE_RETRY_INITIAL_DELAY,
+                max_delay=_GOOGLE_RETRY_MAX_DELAY,
+            )
+        ),
+    )
+
+
+def _is_openai_reasoning_model(model_name: str) -> bool:
+    return (model_name or "").lower().startswith(("o1", "o3", "o4", "gpt-5"))
+
+
+def _call_openai(model_name, api_key, prompt, system, max_tokens):
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key)
+    messages = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    # `max_completion_tokens`, not `max_tokens`: reasoning models (o-series,
+    # gpt-5) reject the latter outright, and every current chat model accepts
+    # the former. Reasoning models count hidden reasoning tokens against it,
+    # hence the headroom for them only — for ordinary chat models the
+    # caller's ceiling stays the real cost ceiling.
+    headroom = _REASONING_HEADROOM if _is_openai_reasoning_model(model_name) else 0
+    res = client.chat.completions.create(
+        model=model_name, messages=messages, max_completion_tokens=max_tokens + headroom
+    )
+    choice = res.choices[0]
+    text = choice.message.content or ""
+    usage_in = usage_out = cached = 0
+    if getattr(res, "usage", None):
+        usage_in, usage_out = res.usage.prompt_tokens, res.usage.completion_tokens
+        details = getattr(res.usage, "prompt_tokens_details", None)
+        cached = (getattr(details, "cached_tokens", 0) or 0) if details else 0
+    return text, usage_in, usage_out, choice.finish_reason == "length", cached
+
+
+def _call_anthropic(model_name, api_key, prompt, system, max_tokens):
+    from anthropic import Anthropic
+
+    client = Anthropic(api_key=api_key)
+    kwargs = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": prompt}],
+        **anthropic_request_options(model_name, max_tokens),
+    }
+    if system:
+        # The same system prompt (brand kit + audit rules) goes out several
+        # times per generation — the compliance audit alone runs for the body,
+        # Instagram, X and Shorts. Marking it cacheable bills the repeats at
+        # the cache-read rate; prompts under the model's minimum cacheable
+        # length are simply sent uncached.
+        kwargs["system"] = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    res = client.messages.create(**kwargs)
+    raise_if_refused(res)
+    text = "".join(block.text for block in res.content if getattr(block, "type", "") == "text")
+    usage_in = usage_out = cached = 0
+    usage = getattr(res, "usage", None)
+    if usage:
+        # Cache reads are recorded separately (`cached`) so they can be priced
+        # at the cache-read rate. Cache writes stay in the ordinary input
+        # count and are priced at the input rate — a slight underestimate,
+        # since writes bill above it.
+        cached = getattr(usage, "cache_read_input_tokens", 0) or 0
+        usage_in = (
+            (usage.input_tokens or 0)
+            + cached
+            + (getattr(usage, "cache_creation_input_tokens", 0) or 0)
+        )
+        usage_out = usage.output_tokens or 0
+    return text, usage_in, usage_out, res.stop_reason == "max_tokens", cached
+
+
+# Models that turned out to reject thinking_budget=0, so later calls in this
+# process skip the attempt that is certain to fail. vision.py shares it.
+GOOGLE_NO_ZERO_THINKING: set = set()
+
+
+def google_rejects_zero_thinking(exc: Exception) -> bool:
+    """Whether a Gemini error is the 'thinking_budget=0 not allowed' refusal.
+
+    2.5 Pro says so in words, but gemini-3.5-flash-lite answers the same
+    setting with a bare '400 INVALID_ARGUMENT — Request contains an invalid
+    argument'. Matching only on 'thinking' made every call on that model fail
+    while [연결 테스트], which sends no thinking setting, reported 연결 정상.
+    A generic 400 is retried once without the setting; if it was some other
+    bad argument the retry fails with the same error and nothing is lost.
+    """
+    text = str(exc).lower()
+    if "thinking" in text:
+        return True
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    return code == 400 and "invalid argument" in text
+
+
+def _call_google(model_name, api_key, prompt, system, max_tokens):
+    from google.genai import types
+
+    client = google_client(api_key)
+
+    def _config(thinking_off: bool):
+        # Without an explicit config, generate_content ignores max_tokens
+        # entirely and falls back to the model's own (much larger) default —
+        # every caller's cost ceiling would silently be a no-op for Gemini.
+        #
+        # `max_output_tokens` is a budget for thinking **plus** visible text.
+        # ai_workers/vision.py already turns thinking off for this reason; the
+        # text path never did, so a post-length response could come back cut
+        # off with most of the budget spent on thoughts.
+        kwargs = {"max_output_tokens": max_tokens}
+        if thinking_off:
+            kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=0)
+        else:
+            kwargs["max_output_tokens"] = max_tokens + _REASONING_HEADROOM
+        if system:
+            kwargs["system_instruction"] = system
+        return types.GenerateContentConfig(**kwargs)
+
+    if model_name in GOOGLE_NO_ZERO_THINKING:
+        res = client.models.generate_content(model=model_name, contents=prompt, config=_config(False))
+    else:
+        try:
+            res = client.models.generate_content(model=model_name, contents=prompt, config=_config(True))
+        except Exception as exc:  # noqa: BLE001
+            # Some models refuse a zero thinking budget. Fall back to the
+            # model's default with headroom rather than failing the call — but
+            # only for that rejection, not for auth/quota errors.
+            if not google_rejects_zero_thinking(exc):
+                raise
+            res = client.models.generate_content(model=model_name, contents=prompt, config=_config(False))
+            GOOGLE_NO_ZERO_THINKING.add(model_name)
+
+    text = res.text or ""
+    usage_in = usage_out = cached = 0
+    meta = getattr(res, "usage_metadata", None)
+    if meta:
+        usage_in = getattr(meta, "prompt_token_count", 0) or 0
+        # Implicit/explicit context caching — already included in prompt_token_count.
+        cached = getattr(meta, "cached_content_token_count", 0) or 0
+        usage_out = (getattr(meta, "candidates_token_count", 0) or 0) + (
+            getattr(meta, "thoughts_token_count", 0) or 0
+        )
+    truncated = False
+    candidates = getattr(res, "candidates", None) or []
+    if candidates:
+        truncated = "MAX_TOKENS" in str(getattr(candidates[0], "finish_reason", "") or "")
+    return text, usage_in, usage_out, truncated, cached
+
+
+_CALLERS = {"openai": _call_openai, "anthropic": _call_anthropic, "google": _call_google}
+
+
+def generate_text(
+    vendor: str,
+    prompt: str,
+    system: Optional[str] = None,
+    max_tokens: int = 2000,
+    note: Optional[str] = None,
+) -> str:
+    """Routes a prompt to the configured vendor and returns the text response.
+    Records real token usage against `usage_log`.
+
+    Never returns a response the provider cut off at the output ceiling: it
+    retries once with a larger ceiling, then raises OutputTruncatedError. An
+    empty response (e.g. a safety block) raises RuntimeError. Callers that are
+    best-effort already catch exceptions and keep their input unchanged.
+    """
+    caller = _CALLERS.get(vendor)
+    if caller is None:
+        raise ValueError(f"Unsupported vendor: {vendor}")
+    model_name, api_key = load_vendor_config(vendor)
+
+    budget = max_tokens
+    for attempt in range(2):
+        text, usage_in, usage_out, truncated, cached = caller(model_name, api_key, prompt, system, budget)
+
+        if not usage_in:
+            usage_in = _estimate_tokens((system or "") + prompt)
+        if not usage_out:
+            usage_out = _estimate_tokens(text)
+        repo.log_usage(
+            kind="text",
+            vendor=vendor,
+            model=model_name,
+            est_input_tokens=usage_in,
+            est_output_tokens=usage_out,
+            cached_input_tokens=cached,
+            note=f"{note or 'text'}{' (truncated)' if truncated else ''}",
+        )
+
+        if not truncated:
+            break
+        if attempt == 0:
+            print(f"[multi_llm_router] {note or 'text'}: output hit {budget} tokens — retrying with a larger ceiling")
+            budget = max_tokens * _TRUNCATION_RETRY_FACTOR
+    else:
+        raise OutputTruncatedError(
+            f"모델 응답이 출력 한도({budget} 토큰)에서 잘렸습니다 ({note or 'text'}). "
+            "잘린 결과를 저장하지 않고 중단했습니다. 다시 시도하거나 분량을 줄여주세요.",
+            partial=text,
+        )
+
+    if not text.strip():
+        raise RuntimeError(
+            f"모델이 빈 응답을 반환했습니다 ({note or 'text'}). 안전 필터에 걸렸거나 일시적 오류일 수 있습니다."
+        )
+    return text
+
+
+_EMBEDDING_DIMENSIONS = 1536
+
+
+def generate_embedding(vendor: str, text: str) -> list:
+    """Vector embedding, kept for parity with the original RAG path.
+
+    Embeddings are a distinct endpoint, not a capability every chat model
+    exposes (Anthropic has no embedding API at all), so this routes per
+    vendor rather than assuming OpenAI regardless of what's configured.
+    """
+    if vendor == "openai":
+        _model, api_key = load_vendor_config("openai")
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key)
+        res = client.embeddings.create(model="text-embedding-3-small", input=text)
+        return res.data[0].embedding
+
+    if vendor == "google":
+        _model, api_key = load_vendor_config("google")
+        from google.genai import types
+
+        client = google_client(api_key)
+        res = client.models.embed_content(
+            model="gemini-embedding-001",
+            contents=text,
+            config=types.EmbedContentConfig(output_dimensionality=_EMBEDDING_DIMENSIONS),
+        )
+        return res.embeddings[0].values
+
+    raise ValueError(f"Embeddings are not supported for vendor: {vendor}")

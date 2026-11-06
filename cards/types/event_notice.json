@@ -1,0 +1,51 @@
+{
+ "id": "event_notice",
+ "name": "교육·특강 안내형",
+ "status": "available",
+ "desc": "일시·대상·장소·신청 방법을 한눈에 정리",
+ "fit": "일시·대상·신청 방법이 있는 교육·특강·프로그램 안내 원고",
+ "template": "【교육·행사 제목 한 줄】\n일시: 【날짜·시간】\n대상: 【누가】\n장소: 【오프라인 장소 또는 온라인】\n참가비: 【무료 또는 금액】\n신청 방법: 【1단계 → 2단계】\n마감: 【신청 마감】",
+ "tips": [
+  "첫 줄이 제목이고 나머지는 '항목: 값' 줄로 쓰면 가장 정확합니다",
+  "원문에 없는 날짜·금액은 만들지 않습니다"
+ ],
+ "count": {
+  "min": 3,
+  "max": 5,
+  "default": 4
+ },
+ "sequence": [
+  {
+   "archetype": "cover",
+   "hint": "제목과 한 줄 요약"
+  },
+  {
+   "archetype": "event_info",
+   "hint": "'라벨: 값' 줄로 일시·대상·장소·참가비"
+  },
+  {
+   "archetype": "body",
+   "hint": "참여·신청 방법"
+  },
+  {
+   "archetype": "call_to_action"
+  }
+ ],
+ "layout_default": "classic",
+ "llm_structure": "1장 cover, 2장 event_info(body_content는 한 줄에 '라벨: 값' — 원문에 있는 항목만), 3장 body(신청 방법), 마지막 call_to_action. 원문에 없는 날짜·금액·혜택은 절대 만들지 말 것",
+ "fit_check": {
+  "need_any": [
+   "일시",
+   "대상",
+   "신청",
+   "모집",
+   "특강",
+   "교육"
+  ],
+  "min_hits": 2
+ },
+ "shorts": {
+  "hook_from": 1,
+  "max_scenes": 4
+ }
+}
