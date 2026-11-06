@@ -50,6 +50,8 @@ env:
 jobs:
   build:
     runs-on: windows-latest
+    # flet build가 멈추면 기본 6시간을 기다리지 않고 40분 안에 실패시킨다.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
 
@@ -114,6 +116,87 @@ jobs:
           Copy-Item -Recurse -Path flet_app/assets -Destination stage/assets
           Write-Host "----- stage/ 트리 -----"
           Get-ChildItem -Recurse stage | Select-Object -First 80 FullName | Format-Table -AutoSize
+
+      # flet build의 로그(build_python_3.14.7)를 보면 flet은 Python 3.14로 의존성을 설치·컴파일한다.
+      # 아래 진단 스텝도 같은 3.14로 돌리고, 끝나면 3.12를 다시 설정해 이후 스텝(flet build 등)은 그대로 3.12를 쓴다.
+      - name: Diagnostic - set up Python 3.14 (temporary)
+        id: py314
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - name: Diagnostic - pip install and compileall per package on Python 3.14 (temporary)
+        # flet build가 site-packages 컴파일에서 멈추는 원인을 찾기 위한 임시 스텝이다. 원인을 찾으면 지운다.
+        # 1) pyproject 의존성을 3.14로 별도 폴더에 설치한다(시간 제한 포함, -v 로그 저장).
+        #    3.14용 wheel이 없어 소스에서 빌드한 패키지는 아래 SOURCE BUILD 목록에 나온다.
+        # 2) 패키지마다 compileall -b -v를 120초 제한으로 돌려 걸린 시간과 TIMEOUT을 남긴다.
+        shell: pwsh
+        timeout-minutes: 20
+        continue-on-error: true
+        env:
+          PY314: ${{ steps.py314.outputs.python-path }}
+        run: |
+          & $env:PY314 --version
+          & $env:PY314 -c "import tomllib; d = tomllib.load(open('stage/pyproject.toml','rb'))['project']['dependencies']; open('diag_req.txt','w').write('\n'.join(d))"
+          @'
+          import os, re, subprocess, sys, time
+
+          def text_of(x):
+              return x.decode(errors="replace") if isinstance(x, bytes) else (x or "")
+
+          def tail(text, n=15):
+              return "\n".join(text.splitlines()[-n:])
+
+          # 1) pip install
+          t = time.time()
+          try:
+              r = subprocess.run(
+                  [sys.executable, "-m", "pip", "install", "-v", "--target", "diag_sp", "-r", "diag_req.txt"],
+                  capture_output=True, text=True, timeout=900)
+              out, rc = r.stdout + r.stderr, r.returncode
+          except subprocess.TimeoutExpired as e:
+              out = text_of(e.stdout) + text_of(e.stderr)
+              rc = "TIMEOUT"
+          open("diag_pip.log", "w", encoding="utf-8").write(out)
+          print(f"pip install: {time.time() - t:.1f}s rc={rc}", flush=True)
+          src = sorted(set(re.findall(r"Building wheel for (\S+)", out)) |
+                       set(re.findall(r"Running setup\.py install for (\S+)", out)))
+          print("SOURCE BUILD (no 3.14 wheel):", ", ".join(src) if src else "none")
+          print("sdist downloads:", ", ".join(sorted(set(re.findall(r"Downloading \S*?/([^/\s]+\.tar\.gz)", out)))) or "none")
+          if rc != 0:
+              print("--- pip log tail ---")
+              print(tail(out, 40))
+          if not os.path.isdir("diag_sp"):
+              sys.exit(1)
+
+          # 2) compileall per package
+          rows = []
+          for n in sorted(os.listdir("diag_sp")):
+              p = os.path.join("diag_sp", n)
+              if not os.path.isdir(p) or n.endswith(".dist-info"):
+                  continue
+              t = time.time()
+              try:
+                  r = subprocess.run([sys.executable, "-m", "compileall", "-b", "-v", p],
+                                     capture_output=True, text=True, timeout=120)
+                  rc = r.returncode
+              except subprocess.TimeoutExpired as e:
+                  rc = "TIMEOUT"
+                  last = text_of(e.stdout)
+                  print(f"!! {n}: TIMEOUT, last output:\n{tail(last, 5)}", flush=True)
+              rows.append((time.time() - t, rc, n))
+              print(f"{rows[-1][0]:7.1f}s rc={rc} {n}", flush=True)
+          rows.sort(key=lambda r: r[0], reverse=True)
+          print("--- slowest ---")
+          for r in rows[:10]:
+              print(f"{r[0]:7.1f}s rc={r[1]} {r[2]}")
+          '@ | Set-Content diag_compile.py -Encoding utf8
+          & $env:PY314 diag_compile.py
+
+      - name: Diagnostic - restore Python 3.12 (temporary)
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
 
       - name: flet build windows
         run: flet build windows stage --yes --verbose
