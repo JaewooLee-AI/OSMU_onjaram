@@ -27,6 +27,20 @@ def b64_src(path: str, width: int) -> Optional[str]:
         return None
 
 
+def fit_size(path: str, max_w: int, max_h: int) -> tuple[int, int]:
+    """그림을 비율 그대로 (max_w, max_h) 안에 맞췄을 때의 크기. 읽을 수 없으면 최대 크기를 돌려줍니다.
+    그림 상자를 이 크기로 두면 빈 여백이 없어 바로 아래 글(사진 설명)이 그림에 붙어 보입니다."""
+    try:
+        with Image.open(path) as im:
+            w, h = ImageOps.exif_transpose(im).size
+        if w <= 0 or h <= 0:
+            return max_w, max_h
+        scale = min(max_w / w, max_h / h, 1.0)
+        return max(1, round(w * scale)), max(1, round(h * scale))
+    except Exception:  # noqa: BLE001
+        return max_w, max_h
+
+
 def image_or_placeholder(path: str, width: int, height: int, fit=None, **kwargs):
     """줄인 그림을 보여 주고, 못 읽으면 파일 이름이 적힌 회색 상자를 보여 줍니다."""
     import flet as ft

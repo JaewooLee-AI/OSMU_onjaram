@@ -325,23 +325,6 @@ def _merge_spans(spans: List[Tuple[int, int, str, int]]) -> List[Tuple[int, int,
 
 # --- 상한 · 정리 --------------------------------------------------------------------
 
-def add_default_captions(content: str, items: List[dict], captions: Dict[str, str], max_len: int = 80) -> List[dict]:
-    """모델이 사진 설명(photo_caption)을 안 쓴 사진에는 사진 분석이 이미 읽어 둔 설명을 그대로 붙입니다(추가 AI 호출 없음).
-    사진을 보지 못한 독자가 설명을 읽고 이해하게 하려는 것이고, 설명이 없는 사진은 건드리지 않습니다."""
-    have = {i.get("path") for i in items or [] if i.get("type") == "photo_caption"}
-    out = list(items or [])
-    for m in IMAGE_TAG_RE.finditer(content or ""):
-        path = m.group(1).strip()
-        caption = re.sub(r"\s+", " ", (captions or {}).get(path) or "").strip()
-        if path in have or not caption:
-            continue
-        if len(caption) > max_len:
-            caption = caption[:max_len].rsplit(" ", 1)[0].rstrip(",.") + "…"
-        out.append({"type": "photo_caption", "path": path, "caption": caption})
-        have.add(path)
-    return out
-
-
 def finalize(content: str, items: List[dict], strength: str, template: str, source: str = "generate") -> dict:
     """교정이 끝난 본문 기준으로 서식을 정리해 저장할 모양으로 만듭니다.
 

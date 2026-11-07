@@ -368,7 +368,6 @@ def apply_format(campaign_id: str, strength: Optional[str] = None, progress: Pro
         note="format-apply",
     )
     items = formatting.parse_apply_response(raw, content)
-    items = formatting.add_default_captions(content, items, caption_attachments(campaign.get("storage_file_paths") or []))
     content_format = formatting.finalize(content, items, design["strength"], design["template"], source="apply")
     report = dict(campaign.get("guardrail_report") or {})
     report["format"] = _format_report(content, content_format)
@@ -376,33 +375,6 @@ def apply_format(campaign_id: str, strength: Optional[str] = None, progress: Pro
     repo.update_campaign(campaign_id, content_format=content_format, guardrail_report=report)
     _report(progress, "완료")
     return repo.get_campaign(campaign_id)
-
-
-def missing_photo_captions(content: str, content_format: Optional[dict]) -> int:
-    """본문의 [IMAGE:] 사진 중 사진 설명이 없는 장수."""
-    have = {i.get("path") for i in (content_format or {}).get("items") or [] if i.get("type") == "photo_caption"}
-    paths = {m.group(1).strip() for m in formatting.IMAGE_TAG_RE.finditer(content or "")}
-    return len(paths - have)
-
-
-def fill_photo_captions(campaign_id: str) -> int:
-    """설명이 없는 사진에 사진 분석이 읽어 둔 설명을 붙입니다 — 글자도 서식도 그대로이고 AI 호출이 없습니다(분석 결과는 캐시).
-    붙인 장수를 돌려줍니다."""
-    campaign = repo.get_campaign(campaign_id)
-    if not campaign or not (campaign.get("content") or "").strip():
-        return 0
-    content, fmt = campaign["content"], campaign.get("content_format") or {}
-    before = missing_photo_captions(content, fmt)
-    if not before:
-        return 0
-    items = formatting.add_default_captions(content, list(fmt.get("items") or []),
-                                            caption_attachments(campaign.get("storage_file_paths") or []))
-    brand_kit = repo.get_campaign_brand_kit(campaign)
-    design = formatting.resolve(campaign.get("design_strength"), brand_kit)
-    new_fmt = formatting.finalize(content, items, fmt.get("strength") or design["strength"],
-                                  fmt.get("template") or design["template"], source=fmt.get("source") or "generate")
-    repo.update_campaign(campaign_id, content_format=new_fmt)
-    return before - missing_photo_captions(content, new_fmt)
 
 
 def _report(progress: Progress, message: str) -> None:
@@ -874,7 +846,6 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             notice_fields, product_fields, target_keywords, progress,
         )
         report.update(sns_report)
-        format_items = formatting.add_default_captions(final_content, format_items, captions)
         content_format = formatting.finalize(final_content, format_items, design["strength"], design["template"])
         report["format"] = _format_report(final_content, content_format)
         report["cost"] = {**run_cost(campaign_id, usage_start), "kind": "generate"}

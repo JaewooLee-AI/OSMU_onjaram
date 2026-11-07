@@ -23,8 +23,6 @@ from ai_workers.content_writer import (
     LENGTH_MODES,
     apply_format,
     enabled_channels,
-    fill_photo_captions,
-    missing_photo_captions,
     regenerate_sns,
     revise_content,
     run_pipeline,
@@ -1174,17 +1172,6 @@ def _build_format_section(page: ft.Page, campaign: dict, scale: float, reload, r
     def on_clear(e: ft.Event) -> None:
         save({**fmt, "items": []})
 
-    def on_fill_captions(e: ft.Event) -> None:
-        try:
-            fill_photo_captions(campaign_id)
-        except Exception as exc:  # noqa: BLE001
-            status.value = f"❌ 사진 설명을 채우지 못했습니다: {exc}"
-            status.color = "#B3261E"
-            status.update()
-            return
-        reload()
-
-    missing_photos = missing_photo_captions(campaign.get("content") or "", fmt)
     busy = campaign.get("status") == "processing"
     apply_button = ft.FilledButton("🎨 서식 다시 입히기" if items else "🎨 서식 적용 (재생성 없이)",
                                    on_click=on_apply, disabled=busy,
@@ -1197,8 +1184,7 @@ def _build_format_section(page: ft.Page, campaign: dict, scale: float, reload, r
                     size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
             *(rows or [ft.Text("아직 서식이 없습니다.", size=fs(11, scale), color=BRAND_COLORS["text_muted"])]),
             ft.Row([apply_button, *([ft.OutlinedButton("서식 모두 지우기", on_click=on_clear)] if items else []),
-                    *([ft.OutlinedButton(f"📷 사진 설명 채우기 ({missing_photos}장 · AI 호출 없음)", on_click=on_fill_captions)]
-                      if missing_photos else []), spinner, status],
+                    spinner, status],
                    spacing=8, wrap=True),
         ],
         spacing=6,

@@ -559,21 +559,6 @@ def test_photo_thumbnails_use_inline_images_and_survive_unreadable_files(tmp_pat
     assert isinstance(image_or_placeholder(str(bad), 90, 90), ft.Container)
 
 
-def test_photo_captions_default_to_vision_description_without_ai_call(populated):
-    """사진 설명이 없는 사진에는 사진 분석이 읽어 둔 설명이 붙고, 모델이 쓴 설명은 그대로 둔다."""
-    from ai_workers import formatting
-    content = "첫 문단.\n\n[IMAGE: a.jpg]\n\n둘째 문단.\n\n[IMAGE: b.jpg]\n\n끝."
-    items = [{"type": "photo_caption", "path": "b.jpg", "caption": "모델이 쓴 설명"}]
-    out = formatting.add_default_captions(content, items, {"a.jpg": "식물이 있는 거실에서 사람들이 둘러앉아 있습니다.", "b.jpg": "분석 설명"})
-    caps = {i["path"]: i["caption"] for i in out if i["type"] == "photo_caption"}
-    assert caps == {"a.jpg": "식물이 있는 거실에서 사람들이 둘러앉아 있습니다.", "b.jpg": "모델이 쓴 설명"}
-    fmt = formatting.finalize(content, out, "standard", "basic")
-    blocks, _ = formatting.bind(content, fmt)
-    assert [b.get("caption") for b in blocks if b["kind"] == "image"] == [caps["a.jpg"], caps["b.jpg"]]
-    from ai_workers.content_writer import missing_photo_captions
-    assert missing_photo_captions(content, {"items": []}) == 2 and missing_photo_captions(content, fmt) == 0
-
-
 def test_studio_card_count_one_makes_a_single_card(populated, tmp_path, monkeypatch):
     from flet_app.views import card_studio, studio_view
     monkeypatch.setattr(card_studio, "EXPORTS_DIR", str(tmp_path))

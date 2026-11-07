@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import flet as ft
 
-from flet_app.image_src import image_or_placeholder
+from flet_app.image_src import fit_size, image_or_placeholder
 
 from ai_workers import formatting
 from core import storage
@@ -31,13 +31,15 @@ def _avatar() -> ft.Container:
 
 
 def _figure(rel_path: str, caption: str | None = None) -> ft.Control:
+    path = str(storage.abs_path(rel_path))
+    w, h = fit_size(path, 560, 360)   # 사진 비율대로 상자를 맞춰 설명이 사진 바로 밑에 붙게 한다
     return ft.Column(
         [
-            image_or_placeholder(str(storage.abs_path(rel_path)), 560, 360, fit=ft.BoxFit.CONTAIN),
+            image_or_placeholder(path, w, h, fit=ft.BoxFit.CONTAIN),
             ft.Text(caption or "사진 설명을 입력하세요.", size=13, color="#555555" if caption else "#AAAAAA",
-                    text_align=ft.TextAlign.CENTER),
+                    text_align=ft.TextAlign.CENTER, width=max(w, 280)),
         ],
-        spacing=6,
+        spacing=4, horizontal_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
 
