@@ -7,7 +7,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
-from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from cards.schema import ShortsScene, EditableStoryboard, MediaAsset
 from cards.fonts import korean_font, display_font, wrap_text_px, text_height
 from cards import brand as bk
@@ -23,7 +23,9 @@ class ShortsOptions:
     caption_style: str = "basic"        # (kinetic 전용) basic(기본 팝업) | kinetic(키네틱 타이포)
     voice: str = "auto"                 # auto | Gemini 목소리 이름 | free(무료 gTTS)
     tts_call: Any = None                # 시험용: 음성 합성 호출을 대신하는 async 함수
-    photo_motion: str = "none"          # (tri 전용) none(정지) | zoom_in | zoom_out | alternate(확대·축소 번갈아) — 가운데 사진 칸만 천천히 움직임
+    photo_motion: str = "none"          # (tri 전용) none(정지) | zoom_in | zoom_out | alternate(확대·축소 번갈아) | dynamic(확대·축소+좌우상하 이동을 장면마다 바꿔 씀) — 가운데 사진 칸만 움직임
+    text_motion: str = "none"           # (tri 전용) none | slide(제목은 위에서·아래 글자는 아래에서 미끄러져 들어오며 나타남)
+    transition: str = "none"            # (tri 전용) none | auto(장면 사이 전환 효과 — 장면마다 다른 효과를 돌려 씀)
     video_scope: str = "none"           # none | opening | key2 | all  (AI 영상화 범위)
     video_mode: str = "image"           # image(사진 움직이기) | link(다음 장면 사진까지 이어서)
     video_overrides: Optional[Dict[int, MediaAsset]] = None  # {장면 인덱스: AI 동영상} — 해당 장면 배경만 교체
@@ -144,43 +146,68 @@ class ShortsRendererService:
             frames.HEIGHT, frames.safe_top, frames.safe_bottom = self.HEIGHT, 250, 250
             frames.FOLLOW_ASPECT = False
             motion = self.options.photo_motion
+            text_motion = self.options.text_motion != "none"
+            use_trans = self.options.transition != "none" and len(timeline) > 1
+            fps = self.FPS
+            half = max(1, round(self.TRANSITION_SEC * fps / 2)) if use_trans else 0
             _, (m0, m1), _ = frames._tri_zones(design.ratio if design.layout == "tri" else [2, 5, 3])
+            animated = motion != "none" or text_motion or use_trans
             listing, last, moved = [], None, 0
+            seg_frames: List[Tuple[str, int]] = []
+            n_scenes = len(timeline)
             for n, item in enumerate(timeline):
                 scene = item["scene"]
                 source = (scene.source_cards or [1])[0]
                 idx = max(0, min(source, len(storyboard.card_slides)) - 1)
                 path = await frames.render_slide(sb2, idx)
                 dur = item["end"] - item["start"]
-                if motion != "none":
+                if animated:
                     slide = storyboard.card_slides[idx]
                     has_photo = bool(slide.asset_id and storyboard.asset(slide.asset_id)
                                      and slide.slide_type in ("cover", "body", "single", "quote")
                                      and design_templates.get(tri_id).uses_photo(slide.slide_type))
-                    kind = ("zoom_in" if n % 2 == 0 else "zoom_out") if motion == "alternate" else motion
+                    if motion == "alternate":
+                        kind = "zoom_in" if n % 2 == 0 else "zoom_out"
+                    elif motion == "dynamic":
+                        kind = f"dyn{n % len(self.DYNAMIC_MOTIONS)}"
+                    else:
+                        kind = motion
+                    b_f, e_f = round(item["start"] * fps), round(item["end"] * fps)
+                    lead = half if (use_trans and n > 0) else 0
+                    tail = half if (use_trans and n < n_scenes - 1) else 0
+                    n_frames = max(2, (e_f + tail) - (b_f - lead)) if use_trans else max(2, int(round(dur * fps)))
                     seg = os.path.join(work_dir, f"seg_{n:02d}.mp4")
-                    await self._zone_motion_segment(path, dur, seg, (m0, m1) if has_photo else None, kind)
-                    moved += 1 if has_photo else 0
+                    await self._tri_scene_segment(path, n_frames, seg, (m0, m1), has_photo and motion != "none", kind,
+                                                  text_motion, delay=(lead / fps + 0.1) if text_motion else 0.0, tag=f"{n:02d}", work_dir=work_dir)
+                    moved += 1 if (has_photo and motion != "none") else 0
                     path = seg
+                    seg_frames.append((seg, n_frames))
                 listing.append((path, dur))
                 last = path
             if motion != "none" and not moved:
                 self.last_warnings.append("사진이 들어간 장면이 없어 움직임을 적용하지 못했습니다(카드에 사진을 넣으면 가운데 사진이 움직입니다).")
-            lines = []
-            for path, dur in listing:
-                lines += [f"file '{path.replace(chr(92), '/').replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'", f"duration {dur:.3f}"]
-            lines.append(f"file '{last.replace(chr(92), '/')}'")   # concat 규칙: 마지막 프레임을 한 번 더
-            concat = os.path.join(work_dir, "frames.txt")
-            with open(concat, "w", encoding="utf-8") as f:
-                f.write("\n".join(lines) + "\n")
+            video_in = None
+            if use_trans:
+                video_in = await self._xfade_segments(seg_frames, half, work_dir)
+            if video_in is None:
+                lines = []
+                for path, dur in listing:
+                    lines += [f"file '{path.replace(chr(92), '/').replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'", f"duration {dur:.3f}"]
+                lines.append(f"file '{last.replace(chr(92), '/')}'")   # concat 규칙: 마지막 프레임을 한 번 더
+                concat = os.path.join(work_dir, "frames.txt")
+                with open(concat, "w", encoding="utf-8") as f:
+                    f.write("\n".join(lines) + "\n")
+                video_in = ["-f", "concat", "-safe", "0", "-i", concat]
+                if use_trans:   # 전환 합성이 실패했을 때: 겹침 없이 잘라 이어 붙인다
+                    video_in = await self._trim_concat(seg_frames, half, work_dir) or video_in
 
             await progress(0.8, "FFmpeg H.264 최종 인코딩 중 (영상 + 내레이션)...")
-            if motion != "none":   # 이미 장면마다 H.264로 만들어 둔 조각을 이어 붙이고 음성만 얹는다
-                await self._run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", concat, "-i", audio_path,
+            if animated:   # 이미 장면마다 H.264로 만들어 둔 조각을 이어 붙이고 음성만 얹는다
+                await self._run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *video_in, "-i", audio_path,
                                  "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}",
                                  "-movflags", "+faststart", output_mp4], "3단 쇼츠 인코딩 실패")
             else:
-                await self._run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-f", "concat", "-safe", "0", "-i", concat, "-i", audio_path,
+                await self._run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *video_in, "-i", audio_path,
                                  "-vf", f"fps={self.FPS},format=yuv420p,scale={self.WIDTH}:{self.HEIGHT}", *ffmpeg_tools.h264_args("good", "medium"), "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart", output_mp4],
                                 "3단 쇼츠 인코딩 실패")
         finally:
@@ -188,26 +215,134 @@ class ShortsRendererService:
         await progress(1.0, "쇼츠 렌더링 완료!")
         return output_mp4
 
-    async def _zone_motion_segment(self, frame_path: str, seconds: float, out: str, zone, motion: str) -> None:
-        """3단 프레임 한 장 → `seconds`초 H.264 조각. `zone`=(가운데 칸 위·아래 y)이면 그 칸만 천천히 확대·축소하고
-        위·아래 글자는 그대로 둔다. zone이 None이면(사진 없는 장면) 정지 화면 그대로."""
+    # 확대·축소와 좌우상하 이동을 섞은 "다이나믹" 동작. (시작 확대, 끝 확대, 시작 x, 끝 x, 시작 y, 끝 y) — x·y는 0~1(가장자리~가장자리)
+    DYNAMIC_MOTIONS = [
+        (1.05, 1.40, 0.50, 0.78, 0.55, 0.30),   # 확대하며 오른쪽 위로
+        (1.32, 1.32, 0.08, 0.92, 0.50, 0.50),   # 왼쪽에서 오른쪽으로 훑기
+        (1.45, 1.08, 0.72, 0.30, 0.28, 0.62),   # 축소하며 왼쪽 아래로
+        (1.30, 1.30, 0.92, 0.08, 0.62, 0.38),   # 오른쪽에서 왼쪽으로 훑기
+    ]
+    TRI_TRANSITIONS = ["smoothleft", "zoomin", "smoothup", "smoothright"]
+    TEXT_SLIDE_SEC = 0.45
+    TEXT_SLIDE_PX = 70
+
+    def _zone_motion_expr(self, kind: str, frames: int) -> Tuple[str, str, str]:
+        """사진 칸 zoompan용 (zoom, x, y) 식. `dyn<n>`은 DYNAMIC_MOTIONS[n]을 부드럽게(ease in-out) 따라간다."""
+        if kind.startswith("dyn"):
+            z0, z1, x0, x1, y0, y1 = self.DYNAMIC_MOTIONS[int(kind[3:]) % len(self.DYNAMIC_MOTIONS)]
+            p = f"(on/{max(1, frames - 1)})"
+            e = f"({p}*{p}*(3-2*{p}))"
+            return (f"{z0}+({z1 - z0:.4f})*{e}", f"(iw-iw/zoom)*({x0}+({x1 - x0:.4f})*{e})", f"(ih-ih/zoom)*({y0}+({y1 - y0:.4f})*{e})")
+        return self._motion_expr(kind, frames)
+
+    def _split_text_layers(self, frame_path: str, zone, work_dir: str, tag: str):
+        """3단 프레임에서 위·아래 글자 칸을 따로 떼어 낸다. 위·아래 칸 배경은 한 색이라, 배경과 다른 픽셀만 글자 층(투명 PNG)으로 만들고
+        바탕 프레임에서는 그 칸을 배경색으로 비운다. 배경이 한 색이 아니면(그라데이션 등) 그 칸은 움직이지 않고 그대로 둔다.
+        반환: (바탕 프레임 경로, [(글자 층 경로, 놓을 y, 방향 -1 위/+1 아래)])"""
+        m0, m1 = zone
+        im = Image.open(frame_path).convert("RGB")
+        W, H = im.size
+        base = im.copy()
+        layers = []
+        for name, (y0, y1), sign in (("top", (0, m0), -1), ("bot", (m1, H), 1)):
+            if y1 - y0 < 4:
+                continue
+            band = im.crop((0, y0, W, y1))
+            bg = band.getpixel((2, 2 if sign < 0 else y1 - y0 - 3))
+            diff = ImageChops.difference(band, Image.new("RGB", band.size, bg)).convert("L")
+            mask = diff.point(lambda v: 255 if v > 0 else 0)
+            hist = mask.histogram()
+            if hist[255] > 0.4 * band.width * band.height or hist[255] == 0:
+                continue                      # 배경이 한 색이 아님 / 글자가 없음 → 그대로 둔다
+            mask = mask.filter(ImageFilter.MaxFilter(3))
+            layer = band.convert("RGBA")
+            layer.putalpha(mask)
+            lpath = os.path.join(work_dir, f"txt_{tag}_{name}.png")
+            layer.save(lpath)
+            base.paste(Image.new("RGB", band.size, bg), (0, y0))
+            layers.append((lpath, y0, sign))
+        bpath = os.path.join(work_dir, f"base_{tag}.png")
+        base.save(bpath)
+        return bpath, layers
+
+    async def _tri_scene_segment(self, frame_path: str, frames: int, out: str, zone, photo_moves: bool, motion: str,
+                                 text_motion: bool, delay: float = 0.0, tag: str = "", work_dir: str = "") -> None:
+        """3단 프레임 한 장 → `frames`장짜리 H.264 조각. 가운데 사진 칸은 `motion`대로 움직이고(photo_moves일 때),
+        text_motion이면 위 제목·아래 글자가 미끄러지며 나타난다. 둘 다 아니면 정지 화면."""
         W, fps = self.WIDTH, self.FPS
-        frames = max(2, int(round(seconds * fps)))
-        if zone is None:
-            vf = "setsar=1,format=yuv420p"
-            cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-i", frame_path,
-                   "-vf", vf, "-frames:v", str(frames), *ffmpeg_tools.h264_args("good", "veryfast"), out]
-        else:
-            m0, m1 = zone
-            zh = m1 - m0
-            z, x, y = self._motion_expr(motion, frames)
+        m0, m1 = zone
+        zh = m1 - m0
+        src, layers = frame_path, []
+        if text_motion:
+            src, layers = self._split_text_layers(frame_path, zone, work_dir or os.path.dirname(out), tag or "x")
+        inputs = ["-loop", "1", "-framerate", str(fps), "-i", src]
+        for lpath, _, _ in layers:
+            inputs += ["-loop", "1", "-framerate", str(fps), "-i", lpath]
+        chains = []
+        if photo_moves:
+            z, x, y = self._zone_motion_expr(motion, frames)
             # 같은 크기로 크게 키운 뒤 움직여야 정수 좌표 떨림이 줄고, d=1은 입력 프레임마다 한 장씩 내보내라는 뜻이다.
-            fc = (f"[0:v]split[a][b];[b]crop={W}:{zh}:0:{m0},scale={W * 2}:{zh * 2},"
-                  f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{zh}:fps={fps},setsar=1[z];"
-                  f"[a][z]overlay=0:{m0},setsar=1,format=yuv420p[v]")
-            cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-loop", "1", "-framerate", str(fps), "-i", frame_path,
-                   "-filter_complex", fc, "-map", "[v]", "-frames:v", str(frames), *ffmpeg_tools.h264_args("good", "veryfast"), out]
-        await self._run(cmd, "사진 움직임 조각 생성 실패")
+            chains.append(f"[0:v]split[a][b];[b]crop={W}:{zh}:0:{m0},scale={W * 2}:{zh * 2},"
+                          f"zoompan=z='{z}':x='{x}':y='{y}':d=1:s={W}x{zh}:fps={fps},setsar=1[z];[a][z]overlay=0:{m0}[c0]")
+        else:
+            chains.append("[0:v]null[c0]")
+        cur = "c0"
+        d_sec, px = self.TEXT_SLIDE_SEC, self.TEXT_SLIDE_PX
+        for i, (_, y0, sign) in enumerate(layers, start=1):
+            st = delay + 0.12 * (i - 1)
+            chains.append(f"[{i}:v]format=rgba,fade=t=in:st={st:.3f}:d={d_sec}:alpha=1[t{i}]")
+            off = f"{sign * px}*pow(clip(1-(t-{st:.3f})/{d_sec},0,1),3)"
+            chains.append(f"[{cur}][t{i}]overlay=x=0:y='{y0}+{off}':eval=frame:shortest=1[c{i}]")
+            cur = f"c{i}"
+        chains.append(f"[{cur}]setsar=1,format=yuv420p[v]")
+        cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(chains), "-map", "[v]",
+               "-frames:v", str(frames), "-pix_fmt", "yuv420p", *ffmpeg_tools.h264_args("good", "veryfast"), "-r", str(fps), out]
+        await self._run(cmd, "사진·글자 움직임 조각 생성 실패")
+
+    async def _xfade_segments(self, segments: List[Tuple[str, int]], half: int, work_dir: str):
+        """장면 조각들을 전환 효과(xfade)로 이어 붙여 영상 입력 인자를 돌려준다. 실패하면 None."""
+        fps, n = self.FPS, len(segments)
+        track = os.path.join(work_dir, "tri_track.mp4")
+        inputs, chains = [], []
+        for i, (seg, _) in enumerate(segments):
+            inputs += ["-i", seg]
+            chains.append(f"[{i}:v]fps={fps},settb=AVTB,format=yuv420p[s{i}]")
+        prev, out_frames, dur = "s0", segments[0][1], 2 * half / fps
+        for i in range(1, n):
+            offset = (out_frames - 2 * half) / fps
+            trans = self.TRI_TRANSITIONS[(i - 1) % len(self.TRI_TRANSITIONS)]
+            chains.append(f"[{prev}][s{i}]xfade=transition={trans}:duration={dur:.4f}:offset={offset:.4f}[x{i}]")
+            out_frames += segments[i][1] - 2 * half
+            prev = f"x{i}"
+        cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(chains), "-map", f"[{prev}]",
+               "-frames:v", str(out_frames), "-pix_fmt", "yuv420p", *ffmpeg_tools.h264_args("good", "veryfast"), "-r", str(fps), track]
+        try:
+            await self._run(cmd, "장면 전환 합성 실패")
+        except RuntimeError as ex:
+            logging.getLogger(__name__).warning(f"{ex} → 전환 없이 연결")
+            self.last_warnings.append("장면 전환 효과를 넣지 못해 생략했습니다.")
+            return None
+        return ["-i", track]
+
+    async def _trim_concat(self, segments: List[Tuple[str, int]], half: int, work_dir: str):
+        """전환을 못 넣을 때: 겹친 앞뒤를 잘라 내 길이를 맞춰 이어 붙인 영상 입력 인자(실패하면 None)."""
+        fps, n = self.FPS, len(segments)
+        parts = []
+        try:
+            for i, (seg, nf) in enumerate(segments):
+                lead = half if i > 0 else 0
+                keep = nf - lead - (half if i < n - 1 else 0)
+                t_seg = os.path.join(work_dir, f"trim_{i:02d}.mp4")
+                await self._run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-i", seg, "-vf",
+                                 f"trim=start_frame={lead}:end_frame={lead + keep},setpts=PTS-STARTPTS", "-r", str(fps),
+                                 *ffmpeg_tools.h264_args("good", "veryfast"), t_seg], "세그먼트 정리 실패")
+                parts.append(t_seg)
+            concat = os.path.join(work_dir, "trim.ffconcat")
+            with open(concat, "w", encoding="utf-8") as f:
+                f.write("ffconcat version 1.0\n" + "".join(f"file '{os.path.basename(x)}'\n" for x in parts))
+            return ["-f", "concat", "-safe", "0", "-i", concat]
+        except RuntimeError:
+            return None
 
     # ------------------------------------------------------------------
     # 1. 음성 합성 (씬 단위)

@@ -190,6 +190,62 @@ def test_tri_shorts_photo_motion_moves_only_the_photo_zone(tmp_path):
     assert ImageChops.difference(a.crop(mid), b.crop(mid)).getbbox() is not None
 
 
+def _photo_storyboard(tmp_path, count=4):
+    from PIL import Image, ImageDraw
+    from cards.schema import MediaAsset
+    repo.set_slot("tts", repo.upsert_model("google", "tts-m2", "T", ["tts"], per_second=0.01))
+    photo = tmp_path / "p.png"
+    img = Image.new("RGB", (1200, 900), "#CCDDCC")
+    d = ImageDraw.Draw(img)
+    for i in range(0, 1200, 60):
+        d.rectangle([i, 100 + (i % 120), i + 30, 700], fill="#446644")
+    img.save(photo)
+    sb = _cards("empathy", count)
+    sb.assets = [MediaAsset(id="A1", kind="image", source="user", path=str(photo))]
+    for slide in sb.card_slides[:2]:
+        slide.asset_id = "A1"
+    scenes, _ = shorts_script.convert(sb, seconds=20)
+    shorts_script.apply_to_storyboard(sb, scenes)
+    return sb, scenes
+
+
+def _grab(mp4, t, path):
+    from PIL import Image
+    subprocess.run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-ss", f"{t}", "-i", mp4, "-frames:v", "1", str(path)], check=True)
+    return Image.open(path).convert("RGB")
+
+
+def _duration(mp4):
+    out = subprocess.run([ffmpeg_tools.ffmpeg(), "-i", mp4], capture_output=True, text=True).stderr
+    import re
+    h, m, sec = re.search(r"Duration: (\d+):(\d+):([\d.]+)", out).groups()
+    return int(h) * 3600 + int(m) * 60 + float(sec)
+
+
+@pytest.mark.skipif(not ffmpeg_tools.available(), reason="FFmpeg 없음")
+def test_tri_shorts_dynamic_motion_text_slide_and_transitions(tmp_path):
+    """다이나믹 사진 움직임 + 글자 슬라이드 + 장면 전환: 글자는 등장이 끝나면 멈추고, 사진은 계속 움직이고, 길이는 음성과 맞는다."""
+    from PIL import ImageChops
+    sb, scenes = _photo_storyboard(tmp_path)
+    renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
+    mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
+        frame_style="tri", tts_call=_fake_tts, photo_motion="dynamic", text_motion="slide", transition="auto")))
+    assert not renderer.last_warnings, renderer.last_warnings
+    if os.environ.get("OSMU_SAMPLE_OUT"):
+        import shutil
+        shutil.copy(mp4, os.environ["OSMU_SAMPLE_OUT"])
+    first = scenes[0].duration_seconds
+    early, settled, late = _grab(mp4, 0.05, tmp_path / "e.png"), _grab(mp4, 1.2, tmp_path / "s.png"), _grab(mp4, max(1.6, first - 0.8), tmp_path / "l.png")
+    top = (0, 260, 1080, 520)
+    mid = (0, 700, 1080, 1100)
+    assert early.size == (1080, 1920)
+    assert ImageChops.difference(early.crop(top), settled.crop(top)).getbbox() is not None     # 등장 중에는 달라진다
+    assert ImageChops.difference(settled.crop(top), late.crop(top)).getbbox() is None          # 등장이 끝나면 멈춘다
+    assert ImageChops.difference(settled.crop(mid), late.crop(mid)).getbbox() is not None      # 사진은 계속 움직인다
+    total = sum(sc.duration_seconds for sc in scenes)
+    assert abs(_duration(mp4) - _duration(str(tmp_path / "out" / "combined_narration.mp3"))) < 0.5
+
+
 def test_voice_estimate_uses_token_price_when_registered():
     """TTS 공식 단가는 100만 토큰당이다 — 토큰 단가만 등록해도 실행 전 예상 금액이 나와야 한다('단가 미등록' 아님)."""
     from types import SimpleNamespace

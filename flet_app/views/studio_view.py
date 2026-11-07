@@ -32,7 +32,7 @@ from flet_app.views.card_studio import (
 )
 from flet_app.views.card_types_view import _src
 from flet_app.views.shorts_studio import (
-    MOTION_OPTIONS, describe_voice_estimate, estimate_voice, render_video,
+    MOTION_OPTIONS, TEXT_MOTION_OPTIONS, TRANSITION_OPTIONS, describe_voice_estimate, estimate_voice, render_video,
 )
 from flet_app.views.workbench_view import _label
 
@@ -550,8 +550,12 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                              options=[ft.DropdownOption(key=str(n), text=f"{n}초") for n in (20, 30, 45, 60)])
     voice_dd = ft.Dropdown(label="목소리", width=300, dense=True, value="auto",
                            options=[ft.DropdownOption(key=v, text=l) for l, v in tts.VOICE_OPTIONS.items()])
-    motion_dd = ft.Dropdown(label="사진 움직임", width=220, dense=True, value="none",
+    motion_dd = ft.Dropdown(label="사진 움직임", width=260, dense=True, value="dynamic",
                             options=[ft.DropdownOption(key=k, text=v) for k, v in MOTION_OPTIONS.items()])
+    text_motion_dd = ft.Dropdown(label="글자 움직임", width=200, dense=True, value="slide",
+                                 options=[ft.DropdownOption(key=k, text=v) for k, v in TEXT_MOTION_OPTIONS.items()])
+    transition_dd = ft.Dropdown(label="장면 전환", width=220, dense=True, value="auto",
+                                options=[ft.DropdownOption(key=k, text=v) for k, v in TRANSITION_OPTIONS.items()])
     short_ai = ft.Switch(label="AI로 내레이션 다듬기", value=False)
     scene_refs: list = []
 
@@ -589,7 +593,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
 
                 async def cb(pct: float, msg: str) -> None:
                     progress(msg)
-                result = render_video(S["cid"], S["sb"], voice_dd.value, "tri", progress=cb, photo_motion=motion_dd.value)
+                result = render_video(S["cid"], S["sb"], voice_dd.value, "tri", progress=cb, photo_motion=motion_dd.value,
+                                      text_motion=text_motion_dd.value, transition=transition_dd.value)
                 return f"✅ 쇼츠 영상을 만들었습니다: {result}"
 
             run_job("쇼츠 영상을 만드는 중입니다 (수 분 걸릴 수 있어요)", job)
@@ -608,7 +613,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             items.append(ft.Text("⚠️ 카드가 바뀌었습니다. [카드에서 대본 만들기]로 다시 만드세요.", size=fs(11, scale), color="#8A6D3B"))
         if not ffmpeg_tools.available():
             items.append(ft.Text("⚠️ FFmpeg를 찾을 수 없어 영상을 만들 수 없습니다.", size=fs(11, scale), color="#B3261E"))
-        items.append(ft.Row([seconds_dd, voice_dd, motion_dd], spacing=8, wrap=True))
+        items.append(ft.Row([seconds_dd, voice_dd, motion_dd, text_motion_dd, transition_dd], spacing=8, wrap=True))
         items.append(ft.Row([short_ai], wrap=True))
         items.append(ft.FilledButton("카드에서 대본 만들기", icon=ft.Icons.AUTO_AWESOME, on_click=on_script))
         if sb.shorts_scenes:

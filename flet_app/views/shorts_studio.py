@@ -72,17 +72,29 @@ MOTION_OPTIONS = {
     "zoom_in": "사진 천천히 확대",
     "zoom_out": "사진 천천히 축소",
     "alternate": "확대·축소 번갈아",
+    "dynamic": "다이나믹 (확대·축소 + 좌우상하 이동)",
+}
+
+TEXT_MOTION_OPTIONS = {
+    "slide": "글자 슬라이드 등장",
+    "none": "글자 움직임 없음",
+}
+
+TRANSITION_OPTIONS = {
+    "auto": "장면 전환 효과",
+    "none": "전환 효과 없음 (바로 넘김)",
 }
 
 
 def render_video(campaign_id: str, sb, voice: str, frame_style: str, progress=None, tts_call=None,
-                 photo_motion: str = "none") -> str:
+                 photo_motion: str = "none", text_motion: str = "none", transition: str = "none") -> str:
     """쇼츠 MP4를 만들어 경로를 글에 저장합니다(이전 파일은 새 파일로 교체)."""
     out_dir = os.path.join(EXPORTS_DIR, "shorts", campaign_id)
     os.makedirs(out_dir, exist_ok=True)
     renderer = ShortsRendererService(export_dir=out_dir)
     path = asyncio.run(renderer.render_shorts_video(
-        sb, progress_callback=progress, options=ShortsOptions(frame_style=frame_style, voice=voice, tts_call=tts_call, photo_motion=photo_motion)))
+        sb, progress_callback=progress, options=ShortsOptions(frame_style=frame_style, voice=voice, tts_call=tts_call, photo_motion=photo_motion,
+                                text_motion=text_motion, transition=transition)))
     repo.update_campaign(campaign_id, shorts_video_path=path)
     return path + (("\n⚠️ " + " / ".join(renderer.last_warnings)) if renderer.last_warnings else "")
 
