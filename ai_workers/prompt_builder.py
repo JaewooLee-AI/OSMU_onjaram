@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from typing import List
 
-from ai_workers import content_mode
+from ai_workers import content_mode, post_types
 
 
 def persona_block(brand_kit: dict) -> List[str]:
@@ -300,7 +300,8 @@ _PLAIN_ONLY_SENTENCE = "마크다운 제목 기호(#)는 쓰지 말고, 문단�
 _FORMATTED_SENTENCE = "서식은 아래 [원고 서식]에 정한 표시만 쓰세요."
 
 
-def build_blog_system_prompt(brand_kit: dict, mode: dict | None = None, design_instruction: str | None = None) -> str:
+def build_blog_system_prompt(brand_kit: dict, mode: dict | None = None, design_instruction: str | None = None,
+                             post_type: str | None = None) -> str:
     """Full Naver-blog system prompt: base + persona + facts + few-shot +
     glossary + (mode-dependent) keyword pressure and length target, and — when
     the post's 서식 강도 isn't '사용 안 함' — the formatting instruction."""
@@ -317,6 +318,7 @@ def build_blog_system_prompt(brand_kit: dict, mode: dict | None = None, design_i
     parts += length_block(profile.get("length_range"))
     if design_instruction:
         parts.append(design_instruction)
+    parts += post_types.structure_block(post_type, brand_kit)
     return "\n\n".join(parts)
 
 

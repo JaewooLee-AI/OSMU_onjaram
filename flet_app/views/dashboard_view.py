@@ -14,6 +14,7 @@ import flet as ft
 from core import repo, setup_check, storage
 
 from flet_app.components.collapsible import collapsible
+from flet_app.views import blog_panel
 from flet_app.state import AppState
 from flet_app.theme import BRAND_COLORS, fs, stat_card, status_chip
 
@@ -276,6 +277,7 @@ def _build_body(page: ft.Page, scale: float, refresh, state: AppState, view: dic
         ),
     ]
     controls.append(_setup_panel(scale))
+    controls.append(blog_panel.build(page, scale, state, refresh))
     warning = repo.budget_message()
     if warning:
         controls.append(ft.Container(

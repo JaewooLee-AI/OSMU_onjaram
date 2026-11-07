@@ -670,3 +670,14 @@ def test_published_posts_keep_their_card_work_and_stay_reachable(populated, tmp_
     board = dashboard_view.build(page, AppState())
     buttons = [getattr(b, "content", None) for b in _collect(board, ft.TextButton)]
     assert "🃏 카드·쇼츠" in buttons and "✍️ 작업 열기" in buttons
+
+
+def test_dashboard_blog_panel_builds_with_and_without_feed(populated):
+    from core import blog_feed
+    from flet_app.views import blog_panel
+    page = FakePage()
+    assert _walk(blog_panel.build(page, 1.0, AppState(), lambda live: None)) >= 3          # 가져오기 전
+    repo.set_app_state(blog_feed.STATE_KEY, {"blog_id": "onjaram", "fetched_at": "2026-11-07T10:00:00", "posts": [
+        {"title": "[출강 후기] 청년 특강", "category": "외부 강의", "date": "2026-10-25", "link": "https://blog.naver.com/onjaram/1", "tags": ["온자람"], "summary": ""},
+        {"title": "2025 바우처 모집 안내", "category": "온자람 소식", "date": "2025-01-31", "link": "https://blog.naver.com/onjaram/2", "tags": [], "summary": ""}]})
+    assert _walk(blog_panel.build(page, 1.0, AppState(), lambda live: None)) > 15          # 가져온 뒤

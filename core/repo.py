@@ -36,6 +36,7 @@ _CAMPAIGN_JSON_COLS = {
     "card_storyboard": None,
     "card_photo_paths": [],
     "labels": [],
+    "consent": [],
 }
 
 _BRAND_KIT_JSON_COLS = {

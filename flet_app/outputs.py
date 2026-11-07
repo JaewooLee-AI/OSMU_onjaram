@@ -45,9 +45,16 @@ def _say(progress: Progress, msg: str) -> None:
         progress(msg)
 
 
-def _plan_type(sb, one_card: bool) -> str:
+# 글 유형 → 카드 시리즈 이름(블로그 카테고리와 맞춤)·기본 카드 종류. 이미 기획한 카드가 있으면 그 종류를 따릅니다.
+SERIES_LABELS = {"review": "온자람 현장", "column": "온자람 마음노트", "notice": "온자람 소식"}
+POST_TYPE_CARD = {"review": "info_summary", "column": "empathy", "notice": "event_notice"}
+
+
+def _plan_type(sb, one_card: bool, post_type: str | None = None) -> str:
     if one_card:
         return ONE_CARD_TYPE
+    if sb is None and post_type in POST_TYPE_CARD and any(p["id"] == POST_TYPE_CARD[post_type] for p in card_types.available()):
+        return POST_TYPE_CARD[post_type]
     if sb is not None and sb.card_format and sb.card_format != ONE_CARD_TYPE:
         return sb.card_format
     for pack in card_types.available():
@@ -78,9 +85,10 @@ def plan_for_campaign(campaign_id: str, type_id: Optional[str] = None, design_id
     old = load_storyboard(campaign)
     with repo.usage_scope(campaign_id):
         sb, report = plan_cards(
-            text, type_id or _plan_type(old, one_card), kit_id=campaign.get("brand_kit_id"), count=count,
+            text, type_id or _plan_type(old, one_card, campaign.get("post_type")), kit_id=campaign.get("brand_kit_id"), count=count,
             design_id=design_id or (old.design_id if old else None), use_llm=bool(use_ai),
-            assets=_assets_of(campaign), elements=BrandElements(),
+            assets=_assets_of(campaign),
+            elements=BrandElements(series_label=SERIES_LABELS.get(campaign.get("post_type") or "", "")),
             image_mode=image_mode or (old.image_mode if old else "own_first"),
         )
     sb.aspect = aspect or (old.aspect if old else "4:5")

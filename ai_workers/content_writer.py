@@ -32,7 +32,8 @@ import functools
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable, Dict, List, Optional
 
-from ai_workers import body_variety, content_mode, formatting
+from ai_workers import body_variety, consent, content_mode, formatting, post_types
+from core import blog_feed
 from ai_workers.guardrail import (
     apply_blacklist_dictionary,
     apply_guardrail_if_enabled,
@@ -84,6 +85,24 @@ from ai_workers.title_variety import (
     rewrite_for_variety,
 )
 from core import repo
+
+def _known_tags() -> List[str]:
+    """내 블로그(RSS)에서 가져온 예전 태그 — 가져온 적이 없으면 빈 목록."""
+    try:
+        return blog_feed.tag_dictionary(blog_feed.load()["posts"])
+    except Exception:  # noqa: BLE001 — 참고용이라 실패해도 글 생성은 계속
+        return []
+
+
+def _related_blog_posts(title: str, content: str) -> List[dict]:
+    """이 글과 주제가 겹치는, 이미 발행한 블로그 글(RSS를 가져온 경우). 같은 주제를 또 쓰는지 알리려는 참고입니다."""
+    try:
+        posts = blog_feed.load()["posts"]
+        found = blog_feed.related(f"{title} {(content or '')[:200]}", posts, limit=3, min_shared=3)
+        return [{"title": p["title"], "date": p["date"], "link": p["link"]} for p in found if p["title"] != title]
+    except Exception:  # noqa: BLE001
+        return []
+
 
 def _title_generation_instruction(seo_keywords: List[str], source_title: str = "") -> str:
     """Asks the LLM to draft the title alongside the body in the same call
@@ -408,6 +427,7 @@ def _quality_pass(
     notice_fields: Optional[dict] = None,
     product_fields: Optional[dict] = None,
     history: Optional[List[dict]] = None,
+    post_type: Optional[str] = None,
 ):
     """Stages 3~6c: compliance, SEO density, and the deterministic backstops.
 
@@ -484,6 +504,7 @@ def _quality_pass(
     final_content, _ = apply_blacklist_dictionary(final_content, brand_kit.get("blacklist_map", {}))
     final_content = ensure_all_photos_tagged(final_content, storage_file_paths)
     final_content = strip_unresolvable_image_tags(final_content, storage_file_paths)
+    final_content = post_types.apply_footer(final_content, brand_kit, post_type)   # 글 유형이 있으면 문의 푸터(전화·주소)
 
     if is_news and source_url:
         # 뉴스 큐레이션에서 온 글은 원문 기사 링크가 본문에 반드시 있어야 합니다
@@ -538,6 +559,7 @@ def _quality_pass(
     report["seo_skipped"] = skipped_keywords
     report["seo_pool"] = list(brand_kit.get("seo_keywords") or [])
     report["content_mode"] = profile["key"]
+    report["related_posts"] = _related_blog_posts(final_title, final_content)
 
     # A keyword the compliance guardrail is obliged to remove can never reach
     # its density target — regenerating just replays the same tug-of-war.
@@ -699,6 +721,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
                         ),
                         source_title,
                     )
+                    + (f" {post_types.title_hint(campaign.get('post_type'))}" if campaign.get("post_type") else "")
                     + avoidance_instruction(title_history)
                 ]
                 if needs_title
@@ -721,6 +744,7 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
             system=build_blog_system_prompt(
                 brand_kit, draft_mode,
                 formatting.instruction(design["template"], design["strength"], bool(storage_file_paths)),
+                post_type=campaign.get("post_type"),
             ),
             # The ceiling moves with the length target. The target counts
             # characters without spaces; with spaces a Korean post is ~1.3x
@@ -828,8 +852,9 @@ def run_pipeline(campaign_id: str, progress: Progress = None) -> Dict:
         final_content, report = _quality_pass(
             draft, final_title, target_keywords, skipped_keywords, brand_kit, vendor,
             storage_file_paths, is_news, source_url, progress, mode, notice_fields,
-            product_fields, history=post_history,
+            product_fields, history=post_history, post_type=campaign.get("post_type"),
         )
+        report["photo_people"] = consent.photo_flags(captions)
         report["title_dictionary_hits"] = title_dict_hits
         report["title_seo"] = {
             "checked": bool(needs_title and seo_keywords),
@@ -1008,6 +1033,7 @@ def revise_content(
             campaign.get("source_url"), progress, mode,
             campaign.get("notice_fields") or {}, campaign.get("product_fields") or {},
             history=repo.recent_posts(exclude_id=campaign_id, limit=body_variety.HISTORY_LIMIT),
+            post_type=campaign.get("post_type"),
         )
         report["revision"] = {
             "instruction": instruction,
@@ -1018,7 +1044,7 @@ def revise_content(
 
         naver_hashtags = _safe(
             progress, "네이버 발행 태그 갱신 중…",
-            lambda: write_naver_hashtags(final_title, final_content, target_keywords, vendor),
+            lambda: write_naver_hashtags(final_title, final_content, target_keywords, vendor, known_tags=_known_tags()),
             campaign.get("naver_hashtags") or [],
         )
         naver_hashtags, tag_issues = validate_naver_tags(naver_hashtags, list(target_keywords))
@@ -1234,7 +1260,7 @@ def _secondary_channels(
         }
         tags_future = _submit(pool, 
             _safe, progress, "네이버 발행 태그 생성 중…",
-            lambda: write_naver_hashtags(final_title, final_content, list(target_keywords or []), vendor),
+            lambda: write_naver_hashtags(final_title, final_content, list(target_keywords or []), vendor, known_tags=_known_tags()),
             [],
         )
         results = {key: (futures[key].result() if key in futures else dict(empty[key])) for key in empty}

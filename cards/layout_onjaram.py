@@ -69,7 +69,7 @@ class OnjaramLayoutMixin:
         W, H, M = self.WIDTH, self.HEIGHT, self.MARGIN
         trust = ctx.design.variant == "trust"
         t = ctx.slide.slide_type
-        label = CATEGORY_COVER if t == "cover" else self.TYPE_NAMES.get(t, "핵심 포인트")
+        label = (getattr(ctx.el, "series_label", "") or CATEGORY_COVER) if t == "cover" else self.TYPE_NAMES.get(t, "핵심 포인트")
         font = korean_font(30, "bold")
         w = int(font.getlength(label)) + 44
         draw.rounded_rectangle([M, 52, M + w, 52 + 54], radius=27 if not trust else 12, fill=pal["main"])

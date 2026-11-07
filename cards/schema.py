@@ -38,6 +38,7 @@ class BrandElements(BaseModel):
     show_sns: bool = False
     qr_url: str = Field(default="", description="QR로 만들 주소 (콘텐츠마다 입력)")
     qr_image: str = Field(default="", description="직접 올린 QR 이미지 경로 (qr_url보다 우선)")
+    series_label: str = Field(default="", description="표지 위쪽 시리즈 이름(블로그 카테고리와 맞춤). 비우면 디자인 기본값")
 
 
 class CardSlide(BaseModel):

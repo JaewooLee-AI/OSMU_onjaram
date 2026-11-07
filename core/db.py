@@ -133,6 +133,10 @@ create table if not exists campaigns (
     -- back to the default for anything it doesn't recognise, and a rejected
     -- INSERT would be a worse failure than an unknown mode.
     content_mode        text,
+    -- 글 유형 'review' | 'column' | 'notice' (ai_workers/post_types.py); null/빈 값 = 구조를 정하지 않음.
+    post_type           text,
+    -- 발행 전 확인한 동의 항목 키 목록(JSON) — ai_workers/consent.py
+    consent             text not null default '[]',
     -- 이 글을 쓸 때 고른 브랜드 킷과, 그때의 킷 이름. 이름을 따로 남기는 이유는
     -- title_history와 같습니다 — 킷을 고치거나 삭제(보관)해도 어느 킷으로 쓴 글인지
     -- 알 수 있어야 합니다. 외래 키를 두지 않는 것도 같은 이유입니다.
@@ -438,6 +442,8 @@ _ADDED_COLUMNS = {
     "campaigns": {
         "source_title": "text",
         "content_mode": "text",
+        "post_type": "text",
+        "consent": "text not null default '[]'",
         "notice_fields": "text not null default '{}'",
         "product_fields": "text not null default '{}'",
         "brand_kit_id": "integer",

@@ -20,7 +20,7 @@ import time
 import flet as ft
 
 import flet_app.simulators as sim
-from ai_workers import formatting, naver_paste_worker
+from ai_workers import consent, formatting, naver_paste_worker
 from ai_workers.naver_publisher import (
     clear_naver_session,
     naver_session_exists,
@@ -173,6 +173,11 @@ def _build_card(
             ], spacing=8)
 
         def on_publish(e: ft.Event) -> None:
+            if consent.missing(repo.get_campaign(campaign_id) or campaign):
+                publish_status.value = "발행 전 확인 항목을 모두 체크해 주세요."
+                publish_status.color = "#B3261E"
+                publish_status.update()
+                return
             if not naver_session_exists():
                 publish_status.value = "네이버 로그인 세션이 없습니다. 먼저 로그인 세션을 저장하세요."
                 publish_status.color = "#B3261E"
@@ -222,12 +227,29 @@ def _build_card(
             page.run_thread(_work)
 
         running = naver_paste_worker.is_running(campaign_id)
+        consent_boxes: list[ft.Control] = []
+        if consent.required(campaign):
+            done = set(campaign.get("consent") or [])
+
+            def on_consent(key: str):
+                def handler(e: ft.Event) -> None:
+                    now = set(repo.get_campaign(campaign_id).get("consent") or [])
+                    (now.add if e.control.value else now.discard)(key)
+                    repo.update_campaign(campaign_id, consent=[k for k in consent.KEYS if k in now])
+                    left = [k for k in consent.KEYS if k not in now]
+                    publish_button.disabled = bool(left) or naver_paste_worker.is_running(campaign_id) or not naver_session_exists()
+                    publish_button.update()
+                return handler
+
+            consent_boxes = [ft.Text("🧑‍🤝‍🧑 발행 전 확인 (현장 후기)", size=fs(12, scale), weight=ft.FontWeight.BOLD)] + [
+                ft.Checkbox(label=text, value=key in done, on_change=on_consent(key)) for key, text in consent.ITEMS
+            ]
         if running:
             publish_status.value = "⏳ 이 글의 게시 창이 열려 있습니다. Chrome 창에서 확인 후 [발행]을 눌러주세요."
             publish_status.color = "#1B6E3C"
         publish_button = ft.FilledButton(
             publish_label, on_click=on_publish, expand=True,
-            disabled=running or not naver_session_exists(),
+            disabled=running or not naver_session_exists() or bool(consent.missing(campaign)),
             tooltip=None if naver_session_exists() else "먼저 네이버에 로그인해주세요.",
         )
         buttons: list[ft.Control] = [publish_button]
@@ -257,7 +279,7 @@ def _build_card(
 
         buttons.append(ft.OutlinedButton("🗑️ 삭제", on_click=on_ask_delete, expand=True))
 
-        return ft.Column([ft.Row(buttons, spacing=8), *extra, publish_status], spacing=6)
+        return ft.Column([*consent_boxes, ft.Row(buttons, spacing=8), *extra, publish_status], spacing=6)
 
     action_box.content = build_actions()
 

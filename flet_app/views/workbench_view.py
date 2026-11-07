@@ -18,7 +18,7 @@ import time
 
 import flet as ft
 
-from ai_workers import content_mode, factsheet, formatting, vision
+from ai_workers import content_mode, factsheet, formatting, post_types, vision
 from ai_workers.content_writer import (
     LENGTH_MODES,
     apply_format,
@@ -421,6 +421,30 @@ def _build_campaign_editor(
         mode_caption,
     ]
 
+    # --- 글 유형 ---------------------------------------------------------------
+    type_caption = ft.Text(
+        post_types.TYPES[campaign["post_type"]]["caption"] if campaign.get("post_type") in post_types.TYPES
+        else "정하지 않으면 글 구조를 AI에게 맡기고, 문의 푸터(전화·주소)도 붙이지 않습니다.",
+        size=fs(11, scale), color=BRAND_COLORS["text_muted"])
+    type_group = ft.RadioGroup(
+        value=post_types.normalize(campaign.get("post_type")),
+        content=ft.Row(
+            [ft.Radio(value=post_types.AUTO, label="자동")]
+            + [ft.Radio(value=k, label=post_types.TYPES[k]["label"]) for k in post_types.ORDER], wrap=True),
+    )
+
+    def on_type_change(e: ft.Event) -> None:
+        type_caption.value = (post_types.TYPES[type_group.value]["caption"] if type_group.value in post_types.TYPES
+                              else "정하지 않으면 글 구조를 AI에게 맡기고, 문의 푸터(전화·주소)도 붙이지 않습니다.")
+        type_caption.update()
+
+    type_group.on_change = on_type_change
+    controls += [
+        ft.Text("🧩 글 유형", weight=ft.FontWeight.BOLD, size=fs(13, scale)),
+        type_group,
+        type_caption,
+    ]
+
     # --- 원고 서식 강도 (요청 4) ------------------------------------------------
     kit_design = formatting.resolve(None, brand_kit)
     strength_group = ft.RadioGroup(
@@ -564,7 +588,8 @@ def _build_campaign_editor(
     def on_save(e: ft.Event) -> None:
         repo.update_campaign(
             campaign_id, title=title_field.value.strip() or None, memo=memo_field.value,
-            content_mode=mode_group.value, design_strength=strength_group.value or None, **_collect_sheet_values(),
+            content_mode=mode_group.value, post_type=type_group.value or None,
+            design_strength=strength_group.value or None, **_collect_sheet_values(),
         )
         gen_status.value = "💾 저장했습니다."
         gen_status.color = "#1B6E3C"
@@ -603,7 +628,8 @@ def _build_campaign_editor(
     def on_generate(e: ft.Event) -> None:
         repo.update_campaign(
             campaign_id, title=title_field.value.strip() or None, memo=memo_field.value,
-            content_mode=mode_group.value, design_strength=strength_group.value or None, **_collect_sheet_values(),
+            content_mode=mode_group.value, post_type=type_group.value or None,
+            design_strength=strength_group.value or None, **_collect_sheet_values(),
         )
 
         # LLM 호출은 몇 초~수십 초가 걸린다 — on_click은 Flet의 이벤트 루프
@@ -1273,6 +1299,12 @@ def _build_report_controls(campaign: dict, scale: float) -> list[ft.Control]:
             + (f" · 교정으로 자리를 잃어 뺀 서식 {fmt_report['dropped']}개" if fmt_report.get("dropped") else ""),
             size=fs(11, scale),
         ))
+    for rel in report.get("related_posts") or []:
+        body.append(ft.Text(f"♻️ 비슷한 주제의 기존 글: {rel['title']} ({rel['date']}) — 같은 내용을 반복하지 않는지 확인하세요.",
+                            size=fs(11, scale), color="#8A6D3B"))
+    if report.get("photo_people"):
+        body.append(ft.Text(f"🧑‍🤝‍🧑 사람이 보이는 사진 {report['photo_people']}장 — 발행 전 얼굴·동의를 확인하세요(후기 글은 게시 화면에서 확인 체크가 필요합니다).",
+                            size=fs(11, scale), color="#8A6D3B"))
     used_mode = report.get("content_mode")
     if used_mode:
         body.append(ft.Text(f"🎚️ 생성 모드: {content_mode.label_of(used_mode)}", size=fs(11, scale)))
