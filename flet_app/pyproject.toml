@@ -19,7 +19,6 @@ dependencies = [
     "pydantic>=2.0",
     "qrcode>=7.4",
     "gTTS>=2.5",
-    "pywin32; platform_system == 'Windows'",
 ]
 
 [tool.flet]

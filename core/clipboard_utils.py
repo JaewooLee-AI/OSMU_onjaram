@@ -71,21 +71,84 @@ def _build_cf_html(fragment_html: str) -> bytes:
     return (header + prefix + fragment_html + suffix).encode("utf-8")
 
 
+_CF_UNICODETEXT = 13
+_GMEM_MOVEABLE = 0x0002
+
+
 def _copy_html_windows(html_content: str) -> bool:
+    """Writes CF_HTML + CF_UNICODETEXT with ctypes (user32/kernel32).
+
+    pywin32 used to do this, but bundling it made `flet build`'s compileall
+    hang on CI, and ctypes needs no extra package. Every Win32 call gets
+    explicit argtypes/restype so 64-bit handles/pointers are not truncated to
+    a C int.
+    """
     try:
-        import win32clipboard
-        import win32con
+        import ctypes
+        import time
+        from ctypes import wintypes
 
-        cf_html = win32clipboard.RegisterClipboardFormat("HTML Format")
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        user32.OpenClipboard.argtypes = [wintypes.HWND]
+        user32.OpenClipboard.restype = wintypes.BOOL
+        user32.CloseClipboard.argtypes = []
+        user32.CloseClipboard.restype = wintypes.BOOL
+        user32.EmptyClipboard.argtypes = []
+        user32.EmptyClipboard.restype = wintypes.BOOL
+        user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+        user32.SetClipboardData.restype = wintypes.HANDLE
+        user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+        user32.RegisterClipboardFormatW.restype = wintypes.UINT
+        kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+        kernel32.GlobalAlloc.restype = wintypes.HANDLE
+        kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalLock.restype = ctypes.c_void_p
+        kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalUnlock.restype = wintypes.BOOL
+        kernel32.GlobalFree.argtypes = [wintypes.HANDLE]
+        kernel32.GlobalFree.restype = wintypes.HANDLE
+
+        cf_html = user32.RegisterClipboardFormatW("HTML Format")
+        if not cf_html:
+            raise ctypes.WinError(ctypes.get_last_error())
+
+        def set_data(fmt: int, data: bytes) -> None:
+            handle = kernel32.GlobalAlloc(_GMEM_MOVEABLE, len(data))
+            if not handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            ptr = kernel32.GlobalLock(handle)
+            if not ptr:
+                err = ctypes.get_last_error()
+                kernel32.GlobalFree(handle)
+                raise ctypes.WinError(err)
+            ctypes.memmove(ptr, data, len(data))
+            kernel32.GlobalUnlock(handle)
+            if not user32.SetClipboardData(fmt, handle):
+                err = ctypes.get_last_error()
+                kernel32.GlobalFree(handle)  # 실패했을 때만 직접 해제한다
+                raise ctypes.WinError(err)
+            # 성공하면 클립보드가 handle을 소유하므로 해제하지 않는다.
+
         plain_text = _TAG_RE.sub("", html_content)
+        text_bytes = (plain_text + "\0").encode("utf-16-le")
+        html_bytes = _build_cf_html(html_content) + b"\0"
 
-        win32clipboard.OpenClipboard()
+        # 다른 프로그램이 클립보드를 잡고 있으면 OpenClipboard가 잠깐 실패한다 — 재시도.
+        for _ in range(10):
+            if user32.OpenClipboard(None):
+                break
+            time.sleep(0.05)
+        else:
+            raise ctypes.WinError(ctypes.get_last_error())
         try:
-            win32clipboard.EmptyClipboard()
-            win32clipboard.SetClipboardData(cf_html, _build_cf_html(html_content))
-            win32clipboard.SetClipboardData(win32con.CF_UNICODETEXT, plain_text)
+            if not user32.EmptyClipboard():
+                raise ctypes.WinError(ctypes.get_last_error())
+            set_data(cf_html, html_bytes)
+            set_data(_CF_UNICODETEXT, text_bytes)
         finally:
-            win32clipboard.CloseClipboard()
+            user32.CloseClipboard()
         return True
     except Exception as exc:  # noqa: BLE001
         print(f"[clipboard_utils] win32 HTML clipboard failed, falling back to plain text: {exc}")
