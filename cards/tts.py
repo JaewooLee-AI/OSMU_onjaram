@@ -26,6 +26,7 @@ VOICE_OPTIONS = {
     "Zephyr · 밝고 산뜻한": "Zephyr",
     "Puck · 경쾌하고 밝은": "Puck",
     "무료 음성 (gTTS · 인터넷 필요, 품질 낮음)": "free",
+    "테스트 전용: 음성 없음 (무음 · 비용 없음)": "silent",
 }
 DEFAULT_VOICE = "Aoede"
 STYLE = ("a calm, warm and gentle counselor's voice, unhurried and reassuring, with natural pauses")

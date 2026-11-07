@@ -138,8 +138,12 @@ class ShortsRendererService:
 
             await progress(0.5, "3단 프레임 그리는 중...")
             design = design_templates.get(storyboard.design_id)
-            tri_id = storyboard.design_id if design.layout == "tri" else "tri-2-5-3"
-            if tri_id != storyboard.design_id:
+            if design.layout == "oj":   # 온자람 전용 디자인은 같은 색의 3단 프레임으로 그린다(경고 없음)
+                pal = design_templates.split_id(storyboard.design_id)[1] or ("navy" if design.variant == "trust" else "sage")
+                tri_id = f"tri-2-5-3@{pal}"
+            else:
+                tri_id = storyboard.design_id if design.layout == "tri" else "tri-2-5-3"
+            if tri_id != storyboard.design_id and design.layout != "oj":
                 self.last_warnings.append("카드 디자인이 3단이 아니어서 쇼츠는 기본 3단(2:5:3)으로 그렸습니다.")
             sb2 = storyboard.model_copy(update={"design_id": tri_id})
             frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
@@ -362,6 +366,18 @@ class ShortsRendererService:
                         "-t", f"{est_duration:.2f}", wav], check=True)
         return wav, "silent"
 
+    def _silent_scenes(self, scenes: List[ShortsScene], work_dir: str) -> List[str]:
+        """장면마다 예상 길이(대본 글자 수 기준)만큼의 무음 파일. 움직임·전환 효과를 보려는 테스트용입니다."""
+        outs = []
+        for i, scene in enumerate(scenes):
+            wav = os.path.join(work_dir, f"scene_{i:02d}.wav")
+            subprocess.run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+                            "-t", f"{max(1.0, scene.duration_seconds):.2f}", wav], check=True)
+            outs.append(wav)
+        self.last_tts_engine = "테스트 전용 무음"
+        self.last_warnings.append("테스트 전용: 음성 없이 만든 무음 영상입니다.")
+        return outs
+
     async def _gemini_tts(self, scenes: List[ShortsScene], work_dir: str) -> Optional[List[str]]:
         """Gemini TTS로 전체 씬 합성. 못 쓰거나 실패하면 None (호출 측이 전체를 무료 음성으로 대체해 목소리가 섞이지 않게 함)"""
         from cards.tts import GeminiTTS, TtsUnavailable
@@ -384,7 +400,10 @@ class ShortsRendererService:
 
     async def _synthesize_scenes(self, scenes: List[ShortsScene], work_dir: str, audio_path: str, tone: str = ""):
         timeline: List[Dict[str, Any]] = []
-        files = await self._gemini_tts(scenes, work_dir)
+        if self.options.voice == "silent":     # 테스트 전용: 음성 합성·인터넷·사용 기록 없이 장면 길이만큼 무음
+            files = await asyncio.to_thread(self._silent_scenes, scenes, work_dir)
+        else:
+            files = await self._gemini_tts(scenes, work_dir)
         if files is None:
             engines, files = set(), []
             for i, scene in enumerate(scenes):

@@ -32,7 +32,7 @@ from flet_app.views.card_studio import (
 )
 from flet_app.views.card_types_view import _src
 from flet_app.views.shorts_studio import (
-    MOTION_OPTIONS, TEXT_MOTION_OPTIONS, TRANSITION_OPTIONS, describe_voice_estimate, estimate_voice, render_video,
+    MOTION_OPTIONS, TEXT_MOTION_OPTIONS, TRANSITION_OPTIONS, describe_voice_estimate, estimate_voice, render_video, voice_note,
 )
 from flet_app.views.workbench_view import _label
 
@@ -419,6 +419,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         slide.lead_headline, slide.body_content, slide.takeaway = edit_refs["head"].value or "", edit_refs["text"].value or "", edit_refs["take"].value or ""
         if edit_refs.get("sv") is not None:
             slide.stat_value, slide.stat_label = edit_refs["sv"].value or "", edit_refs["sl"].value or ""
+        if edit_refs.get("promo") is not None:
+            slide.promo_badge = (edit_refs["promo"].value or "").strip()
+            slide.qr_caption = (edit_refs["qr_cap"].value or "").strip()
         dd = edit_refs.get("photo")
         if dd is not None and dd.value != edit_refs["photo_initial"]:     # 바꾼 칸만 '직접 고름'으로 굳힌다
             if dd.value == "none":
@@ -502,6 +505,37 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             msg += f" (실패 {len(result['failed'])}장: {result['failed'][0][1]})"
         return msg
 
+    async def on_pick_qr(e: ft.Event) -> None:
+        """QR 코드 이미지 한 장을 이 카드(마지막 안내)에 붙입니다. 이미지는 그대로(재압축 없이) 이 글의 카드 폴더에 PNG로 저장합니다."""
+        files = await ft.FilePicker().pick_files(allow_multiple=False, with_data=True, file_type=ft.FilePickerFileType.CUSTOM,
+                                                allowed_extensions=["png", "jpg", "jpeg", "webp"])
+        if not files or not files[0].bytes:
+            return
+        try:
+            import io
+            import time
+            from PIL import Image
+            im = Image.open(io.BytesIO(files[0].bytes))
+            im.load()
+            folder = os.path.join(EXPORTS_DIR, "cards", S["cid"], "assets")
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, f"qr_{S['idx'] + 1}_{time.strftime('%H%M%S')}.png")
+            im.save(path, "PNG")
+        except Exception as exc:  # noqa: BLE001
+            say(f"QR 이미지를 읽지 못했습니다: {exc}", ok=False)
+            return
+        apply_edits()
+        S["sb"].card_slides[S["idx"]].qr_image = path
+        save_storyboard(S["cid"], S["sb"])
+        say("✅ QR 이미지를 붙였습니다. [적용]을 누르면 카드에 그려집니다.")
+        draw()
+
+    def on_clear_qr(e: ft.Event) -> None:
+        apply_edits()
+        S["sb"].card_slides[S["idx"]].qr_image = ""
+        save_storyboard(S["cid"], S["sb"])
+        draw()
+
     def section_b() -> ft.Control:
         sb, i = S["sb"], S["idx"]
         slide = sb.card_slides[i]
@@ -529,6 +563,21 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             extra.append(ft.Row([dd, ai_btn], spacing=8, wrap=True))
             if not is_slot:
                 extra.append(ft.Text("이 카드는 보통 사진 없이 가운데에 목록·안내를 그립니다. 사진을 고르면 그 목록 대신 사진이 들어갑니다.",
+                                     size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
+        if slide.slide_type == "call_to_action":
+            promo = ft.TextField(label="할인·혜택 배지 (예: 청년 5회기 할인 — 비우면 배지 없음)", value=slide.promo_badge, dense=True)
+            qr_cap = ft.TextField(label="QR 옆 안내 문구 (비우면 기본 문구)", value=slide.qr_caption, dense=True)
+            edit_refs.update({"promo": promo, "qr_cap": qr_cap})
+            qr_ok = bool(slide.qr_image and os.path.exists(slide.qr_image))
+            qr_row = ft.Row([
+                ft.OutlinedButton("QR 이미지 바꾸기" if qr_ok else "QR 이미지 올리기", icon=ft.Icons.QR_CODE_2, on_click=on_pick_qr),
+                *([ft.TextButton("QR 지우기", on_click=on_clear_qr)] if qr_ok else []),
+                ft.Text("QR 이미지가 붙어 있습니다" if qr_ok else "QR이 필요할 때 만들어서 올리세요(없으면 QR 없이 그립니다)",
+                        size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+            ], spacing=8, wrap=True)
+            extra.extend([promo, qr_row, qr_cap])
+            if not design_templates.get(sb.design_id).layout == "oj":
+                extra.append(ft.Text("배지·QR은 '온자람' 디자인에서 그려집니다. 다른 디자인에서는 보이지 않습니다.",
                                      size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
         req = ft.TextField(label="말로 고치기 — 예: 제목을 더 짧게 / 이미지를 숲 느낌으로 / 배경을 연한 파란색으로 / 모든 카드 글자를 크게", multiline=True,
                            min_lines=1, max_lines=3, dense=True)
@@ -601,7 +650,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
 
         page.show_dialog(ft.AlertDialog(
             modal=True, title=ft.Text("쇼츠 영상을 만들까요?"),
-            content=ft.Text(describe_voice_estimate(est) + "\n음성 합성은 사용 기록에 남고 비용이 발생할 수 있습니다."),
+            content=ft.Text(voice_note(voice_dd.value, est) + ("" if voice_dd.value == "silent" else "\n음성 합성은 사용 기록에 남고 비용이 발생할 수 있습니다.")),
             actions=[ft.TextButton("취소", on_click=lambda e: page.pop_dialog()), ft.FilledButton("만들기", on_click=go)],
         ))
 

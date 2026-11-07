@@ -67,6 +67,13 @@ def describe_voice_estimate(est: dict) -> str:
     return f"{head} · 음성 모델 {est['model']['display_name']} · 예상 약 ${est['usd']:.3f} ({est.get('basis') or '등록 단가'})"
 
 
+def voice_note(voice: str, est: dict) -> str:
+    """확인 창·화면에 보여 줄 음성 안내. 테스트 전용 무음이면 비용이 없다고 알립니다."""
+    if voice == "silent":
+        return "테스트 전용: 음성 없이 무음으로 만듭니다 (음성 합성 비용 없음)"
+    return describe_voice_estimate(est)
+
+
 MOTION_OPTIONS = {
     "none": "움직임 없음 (정지 화면)",
     "zoom_in": "사진 천천히 확대",

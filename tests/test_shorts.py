@@ -186,8 +186,8 @@ def test_tri_shorts_photo_motion_moves_only_the_photo_zone(tmp_path):
     assert a.size == (1080, 1920)
     top = (0, 260, 1080, 520)       # 위 제목 칸(안전 여백 250 바로 아래)
     mid = (0, 700, 1080, 1100)      # 가운데 사진 칸
-    assert ImageChops.difference(a.crop(top), b.crop(top)).getbbox() is None
-    assert ImageChops.difference(a.crop(mid), b.crop(mid)).getbbox() is not None
+    assert _changed(a, b, top) < 60       # 압축 잡음 정도만
+    assert _changed(a, b, mid) > 200
 
 
 def _photo_storyboard(tmp_path, count=4):
@@ -207,6 +207,13 @@ def _photo_storyboard(tmp_path, count=4):
     scenes, _ = shorts_script.convert(sb, seconds=20)
     shorts_script.apply_to_storyboard(sb, scenes)
     return sb, scenes
+
+
+def _changed(a, b, box, thresh=40):
+    """두 그림의 box 안에서 크게 달라진 픽셀 수(H.264 압축 잡음은 무시)."""
+    from PIL import ImageChops
+    diff = ImageChops.difference(a.crop(box), b.crop(box)).convert("L").point(lambda v: 255 if v > thresh else 0)
+    return diff.histogram()[255]
 
 
 def _grab(mp4, t, path):
@@ -239,9 +246,9 @@ def test_tri_shorts_dynamic_motion_text_slide_and_transitions(tmp_path):
     top = (0, 260, 1080, 520)
     mid = (0, 700, 1080, 1100)
     assert early.size == (1080, 1920)
-    assert ImageChops.difference(early.crop(top), settled.crop(top)).getbbox() is not None     # 등장 중에는 달라진다
-    assert ImageChops.difference(settled.crop(top), late.crop(top)).getbbox() is None          # 등장이 끝나면 멈춘다
-    assert ImageChops.difference(settled.crop(mid), late.crop(mid)).getbbox() is not None      # 사진은 계속 움직인다
+    assert _changed(early, settled, top) > 500     # 등장 중에는 달라진다
+    assert _changed(settled, late, top) < 60       # 등장이 끝나면 멈춘다(압축 잡음만)
+    assert _changed(settled, late, mid) > 200      # 사진은 계속 움직인다
     total = sum(sc.duration_seconds for sc in scenes)
     assert abs(_duration(mp4) - _duration(str(tmp_path / "out" / "combined_narration.mp3"))) < 0.5
 
@@ -261,3 +268,24 @@ def test_voice_estimate_uses_token_price_when_registered():
     est = estimate_voice(sb)
     assert est["usd"] is not None and est["usd"] > 0 and "예상 약 $" in describe_voice_estimate(est)
     assert est["basis"] == "토큰 단가 기준 어림"
+
+
+@pytest.mark.skipif(not ffmpeg_tools.available(), reason="FFmpeg 없음")
+def test_silent_test_voice_makes_video_without_tts_or_usage(tmp_path):
+    """테스트 전용 '음성 없음': 음성 모델 호출·사용 기록 없이 무음 영상이 만들어지고 경고로 알려 준다."""
+    sb, scenes = _photo_storyboard(tmp_path)
+    called = []
+
+    async def boom(*a, **k):
+        called.append(1)
+        raise AssertionError("TTS를 부르면 안 됩니다")
+
+    before = len(repo.list_usage()) if hasattr(repo, "list_usage") else 0
+    renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
+    mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
+        frame_style="tri", voice="silent", tts_call=boom, photo_motion="dynamic", text_motion="slide", transition="auto")))
+    assert not called and os.path.exists(mp4)
+    assert any("무음" in w for w in renderer.last_warnings)
+    assert abs(_duration(mp4) - sum(max(1.0, s.duration_seconds) for s in scenes) - 0.3 * (len(scenes) - 1)) < 1.0
+    from flet_app.views.shorts_studio import voice_note
+    assert "비용 없음" in voice_note("silent", {})
