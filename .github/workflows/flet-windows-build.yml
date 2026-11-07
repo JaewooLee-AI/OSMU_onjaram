@@ -125,11 +125,11 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Diagnostic - pip install and compileall per package on Python 3.14 (temporary)
+      - name: Diagnostic - pip install and compileall -b on Python 3.14 (temporary)
         # flet build가 site-packages 컴파일에서 멈추는 원인을 찾기 위한 임시 스텝이다. 원인을 찾으면 지운다.
         # 1) pyproject 의존성을 3.14로 별도 폴더에 설치한다(시간 제한 포함, -v 로그 저장).
         #    3.14용 wheel이 없어 소스에서 빌드한 패키지는 아래 SOURCE BUILD 목록에 나온다.
-        # 2) 패키지마다 compileall -b -v를 120초 제한으로 돌려 걸린 시간과 TIMEOUT을 남긴다.
+        # 2) flet처럼 diag_sp 전체에 compileall -b를 한 번 돌린다(150초 제한). 멈추면 마지막 20줄과 멈춘 파일·패키지·크기를 남긴다.
         shell: pwsh
         timeout-minutes: 20
         continue-on-error: true
@@ -151,7 +151,7 @@ jobs:
           t = time.time()
           try:
               r = subprocess.run(
-                  [sys.executable, "-m", "pip", "install", "-v", "--target", "diag_sp", "-r", "diag_req.txt"],
+                  [sys.executable, "-m", "pip", "install", "-v", "--no-compile", "--target", "diag_sp", "-r", "diag_req.txt"],
                   capture_output=True, text=True, timeout=900)
               out, rc = r.stdout + r.stderr, r.returncode
           except subprocess.TimeoutExpired as e:
@@ -169,27 +169,48 @@ jobs:
           if not os.path.isdir("diag_sp"):
               sys.exit(1)
 
-          # 2) compileall per package
-          rows = []
-          for n in sorted(os.listdir("diag_sp")):
-              p = os.path.join("diag_sp", n)
-              if not os.path.isdir(p) or n.endswith(".dist-info"):
-                  continue
-              t = time.time()
-              try:
-                  r = subprocess.run([sys.executable, "-m", "compileall", "-b", "-v", p],
-                                     capture_output=True, text=True, timeout=120)
-                  rc = r.returncode
-              except subprocess.TimeoutExpired as e:
-                  rc = "TIMEOUT"
-                  last = text_of(e.stdout)
-                  print(f"!! {n}: TIMEOUT, last output:\n{tail(last, 5)}", flush=True)
-              rows.append((time.time() - t, rc, n))
-              print(f"{rows[-1][0]:7.1f}s rc={rc} {n}", flush=True)
-          rows.sort(key=lambda r: r[0], reverse=True)
-          print("--- slowest ---")
-          for r in rows[:10]:
-              print(f"{r[0]:7.1f}s rc={r[1]} {r[2]}")
+          # 2) flet과 같은 방식: diag_sp 전체를 한 번에 compileall -b (clean 폴더, 3.14).
+          #    compileall에는 -v가 없다. 파일마다 "Compiling '...'" 줄을 출력하므로, 멈추면 마지막 줄이 멈춘 파일이다.
+          #    stdout이 파이프면 버퍼링되므로 -u로 줄 단위로 바로 받는다.
+          import collections, threading
+          pyc = sum(f.endswith(".pyc") for _, _, fs in os.walk("diag_sp") for f in fs)
+          legacy = sum(1 for d, _, fs in os.walk("diag_sp") if os.path.basename(d) != "__pycache__"
+                       for f in fs if f.endswith(".pyc"))
+          print(f"before compileall: .pyc total={pyc}, legacy(-b) .pyc={legacy}", flush=True)
+          last = collections.deque(maxlen=20)
+          proc = subprocess.Popen([sys.executable, "-u", "-m", "compileall", "-b", "diag_sp"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, errors="replace", bufsize=1)
+          def pump():
+              for line in proc.stdout:
+                  last.append(line.rstrip(chr(10)))
+          th = threading.Thread(target=pump, daemon=True)
+          th.start()
+          t = time.time()
+          try:
+              rc = proc.wait(timeout=150)
+          except subprocess.TimeoutExpired:
+              rc = "TIMEOUT"
+              proc.kill()
+              proc.wait()
+          th.join(5)
+          print(f"compileall -b diag_sp: {time.time() - t:.1f}s rc={rc}", flush=True)
+          if rc != 0:
+              print("--- last 20 lines ---")
+              print(chr(10).join(last))
+          if rc == "TIMEOUT":
+              files = [m.group(1) for l in last for m in [re.match(r"Compiling '(.+?)'", l)] if m]
+              if files:
+                  f = files[-1].replace(chr(92) * 2, chr(92))  # compileall은 경로를 repr로 출력해 \가 겹쳐 나온다
+                  rel = os.path.relpath(f, "diag_sp")
+                  pkg = rel.split(os.sep)[0]
+                  size = os.path.getsize(f) if os.path.exists(f) else "?"
+                  print(f"STUCK FILE: {f}")
+                  print(f"STUCK PACKAGE: {pkg}")
+                  print(f"STUCK FILE SIZE: {size} bytes")
+              else:
+                  print("STUCK FILE: unknown (no 'Compiling' line seen)")
+              sys.exit(1)
           '@ | Set-Content diag_compile.py -Encoding utf8
           & $env:PY314 diag_compile.py
 
