@@ -309,3 +309,37 @@ def test_non_tri_design_shorts_keeps_the_card_design_centered_in_9x16(tmp_path):
     r2 = ShortsRendererService(export_dir=str(tmp_path / "out2"))
     mp4b = asyncio.run(r2.render_shorts_video(sb, options=ShortsOptions(frame_style="tri", tts_call=_fake_tts)))
     assert os.path.exists(mp4b) and not r2.last_warnings
+
+
+def test_tts_sends_no_style_instruction_and_overlong_audio_is_retried_not_cached(tmp_path):
+    """영어 지시문이 읽혀 음성이 길어지는 문제: 지시문은 한국어, 이상하게 긴 음성은 한 번 다시 합성하고 캐시하지 않는다."""
+    assert tts.style_instruction() == ""            # 지시문을 보내면 모델이 그것까지 읽는다
+    assert tts.is_overlong("가" * 60, 24.0) and tts.is_overlong("가" * 60, 17.0)
+    assert not tts.is_overlong("가" * 57, 10.2) and not tts.is_overlong("가" * 63, 13.0) and not tts.is_overlong("가" * 84, 14.8)
+    repo.set_slot("tts", repo.upsert_model("google", "tts-model-y", "T", ["tts"], per_second=0.01))
+    text = "가" * 60
+    calls = []
+
+    async def flaky(model_id, t, voice):
+        calls.append(1)
+        if len(calls) <= 2:                        # 처음 두 번은 지시문까지 읽은 것처럼 24초
+            return _wav(24.0), {"in": 3, "out": 9}
+        return _wav(len(t) / 6.0), {"in": 3, "out": 4}
+
+    engine = tts.GeminiTTS("auto", str(tmp_path / "c"), call=flaky)
+    out = str(tmp_path / "o.wav")
+    asyncio.run(engine.synthesize_all([text], [out]))
+    assert len(calls) == 2 and engine.warnings and not os.listdir(str(tmp_path / "c"))   # 재시도 1번, 경고, 캐시 안 함
+    asyncio.run(engine.synthesize_all([text], [out]))                                  # 다시 만들면 새로 합성 → 정상 → 캐시
+    assert len(calls) == 3 and len(os.listdir(str(tmp_path / "c"))) == 1
+    assert len([u for u in repo.recent_usage(20) if u["kind"] == "tts"]) >= 3           # 재시도 비용도 기록
+
+
+def _wav(sec):
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(24000)
+        w.writeframes(b"\0\0" * int(24000 * sec))
+    return buf.getvalue()

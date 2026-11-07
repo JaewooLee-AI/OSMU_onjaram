@@ -29,7 +29,13 @@ VOICE_OPTIONS = {
     "테스트 전용: 음성 없음 (무음 · 비용 없음)": "silent",
 }
 DEFAULT_VOICE = "Aoede"
-STYLE = ("a calm, warm and gentle counselor's voice, unhurried and reassuring, with natural pauses")
+# 말투 지시문은 보내지 않습니다. 이 음성 모델은 지시문과 대본을 한 입력 글로 받아 지시문까지 소리 내어 읽습니다
+# (영어 지시문은 가끔, 한국어 지시문은 장면마다 읽혀 21~26초짜리 음성이 나온 것을 실측). 분위기는 목소리 선택(기본 Aoede, 부드럽고 편안한)으로 정합니다.
+# 대본에 없는 말이 들어가면 안 되므로, 모델에는 대본 글자만 보냅니다.
+
+# 대본 글자 수에 비해 음성이 이만큼 길면 '대본에 없는 말을 읽었다'고 봅니다(실측 보통 초당 4.9~5.7자).
+MIN_CHARS_PER_SEC = 4.5
+SLACK_SEC = 1.5
 
 
 def pick_voice(choice: str) -> str:
@@ -37,8 +43,7 @@ def pick_voice(choice: str) -> str:
 
 
 def style_instruction() -> str:
-    # 영어 지시문은 읽히지 않고 한국어 본문만 낭독됨(형제 프로젝트에서 실측)
-    return f"Read the following Korean narration in {STYLE}, at a relaxed pace suitable for a short video:"
+    return ""        # 위 설명 참고 — 지시문을 보내지 않음
 
 
 def _pcm_to_wav(pcm: bytes, rate: int = 24000) -> bytes:
@@ -53,6 +58,11 @@ def _wav_seconds(data: bytes) -> float:
         return max(0.0, (len(data) - 44) / (rate * 2))
     except struct.error:
         return 0.0
+
+
+def is_overlong(text: str, seconds: float) -> bool:
+    """대본(글자 수)에 비해 음성이 지나치게 긴가 — 대본에 없는 말(지시문 등)을 읽었을 때."""
+    return seconds > len((text or "").strip()) / MIN_CHARS_PER_SEC + SLACK_SEC
 
 
 class TtsUnavailable(RuntimeError):
@@ -73,6 +83,7 @@ class GeminiTTS:
         self._call_override = call            # 시험용: async (model_id, text, voice) -> (wav 바이트, 사용량 dict)
         os.makedirs(cache_dir, exist_ok=True)
         self._client = None
+        self.warnings: List[str] = []         # 화면에 알릴 경고(이상하게 긴 음성 등)
 
     def _cache_path(self, text: str) -> str:
         key = hashlib.sha256(f"{self.model['model_id']}|{self.voice}|{self.instruction}|{text}".encode()).hexdigest()[:24]
@@ -102,16 +113,29 @@ class GeminiTTS:
                     reused += 1
                     return
                 data, usage = await self._request(text)
-                with open(cached, "wb") as f:
-                    f.write(data)
+                self._log(data, usage)
+                if is_overlong(text, _wav_seconds(data)):
+                    # 대본에 없는 말을 읽은 듯하다 → 한 번 더 합성해 더 짧은 쪽을 쓴다(두 번 다 비용이 듭니다).
+                    data2, usage2 = await self._request(text)
+                    self._log(data2, usage2)
+                    if _wav_seconds(data2) < _wav_seconds(data):
+                        data = data2
+                bad = is_overlong(text, _wav_seconds(data))
+                if bad:
+                    self.warnings.append(f"음성이 대본보다 지나치게 깁니다(대본에 없는 말이 섞였을 수 있음): '{text[:20]}…' — 이 장면을 다시 만들어 보세요.")
+                else:
+                    with open(cached, "wb") as f:      # 이상한 음성은 캐시하지 않아 다시 만들 때 새로 합성합니다
+                        f.write(data)
                 with open(out, "wb") as f:
                     f.write(data)
-                repo.log_usage("tts", vendor=self.model["vendor"], model=self.model["model_id"],
-                               est_input_tokens=int(usage.get("in", 0)), est_output_tokens=int(usage.get("out", 0)),
-                               seconds=_wav_seconds(data), note="shorts-tts")
 
         await asyncio.gather(*(one(t, o) for t, o in zip(texts, out_paths)))
         return reused
+
+    def _log(self, data: bytes, usage: dict) -> None:
+        repo.log_usage("tts", vendor=self.model["vendor"], model=self.model["model_id"],
+                       est_input_tokens=int(usage.get("in", 0)), est_output_tokens=int(usage.get("out", 0)),
+                       seconds=_wav_seconds(data), note="shorts-tts")
 
     async def _request(self, text: str):
         last: Optional[Exception] = None
@@ -131,7 +155,7 @@ class GeminiTTS:
         from google.genai import types
         client = self._api_client()
         response = await asyncio.wait_for(client.aio.models.generate_content(
-            model=self.model["model_id"], contents=f"{self.instruction}\n{text}",
+            model=self.model["model_id"], contents=text,
             config=types.GenerateContentConfig(
                 response_modalities=["AUDIO"],
                 speech_config=types.SpeechConfig(voice_config=types.VoiceConfig(

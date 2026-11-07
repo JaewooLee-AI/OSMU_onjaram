@@ -481,6 +481,7 @@ class ShortsRendererService:
             logging.getLogger(__name__).warning(f"Gemini TTS 실패: {e}")
             self.last_warnings.append(f"Gemini 음성 합성 실패 → 무료 음성으로 대체했습니다 ({type(e).__name__})")
             return None
+        self.last_warnings += tts.warnings
         self.last_tts_engine = f"Gemini TTS · {tts.voice} ({tts.model['model_id']})" + (f" · 캐시 {reused}개 재사용" if reused else "")
         return outs
 
