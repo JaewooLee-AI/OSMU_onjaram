@@ -30,6 +30,11 @@ on:
       - "installer/**"
       - ".github/workflows/flet-windows-build.yml"
   workflow_dispatch:
+    inputs:
+      defender_exclusion:
+        description: "flet build 전에 stage 폴더·python.exe를 Defender 실시간 검사 제외에 추가(진단용)"
+        type: boolean
+        default: false
 
 # 릴리스 생성(아래 Publish GitHub Release 스텝)에 필요한 권한.
 permissions:
@@ -219,21 +224,41 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Diagnostic - Defender exclusion (temporary, workflow_dispatch input)
+        # 실행할 때 defender_exclusion을 true로 고르면 flet build 전에 Windows Defender 실시간 검사에서
+        # stage 폴더와 python.exe를 제외한다. 멈춤이 실시간 검사 때문인지 가리는 용도다.
+        if: ${{ inputs.defender_exclusion }}
+        shell: pwsh
+        run: |
+          try {
+            Write-Host "실시간 보호(변경 전): $((Get-MpComputerStatus).RealTimeProtectionEnabled)"
+            Add-MpPreference -ExclusionPath "$PWD\stage"
+            Add-MpPreference -ExclusionProcess 'python.exe'
+            $pref = Get-MpPreference
+            Write-Host "ExclusionPath:    $($pref.ExclusionPath -join '; ')"
+            Write-Host "ExclusionProcess: $($pref.ExclusionProcess -join '; ')"
+          } catch {
+            Write-Host "::warning::Defender 제외 설정 실패: $($_.Exception.Message)"
+          }
+
       - name: flet build windows
-        # 진단용으로 flet build를 백그라운드로 실행하고 최대 8분 기다린다(임시 — 원인을 찾으면 원래의
-        # `flet build windows stage --yes --verbose` 한 줄로 되돌린다). 4분이 지나도 안 끝나면 프로세스·
-        # site-packages 스냅샷을 찍고, 8분이 되면 flet과 자식 프로세스를 모두 죽이고 단계를 실패시킨다.
-        # 8분 안에 끝나면 flet의 종료 코드를 그대로 단계 결과로 넘긴다.
+        # 진단용으로 flet build를 백그라운드로 실행하고 기다린다(임시 — 원인을 찾으면 원래의
+        # `flet build windows stage --yes --verbose` 한 줄로 되돌린다). 4분 안에 끝나면 flet의 종료 코드를
+        # 그대로 단계 결과로 넘긴다. 4분이 지나도 안 끝나면 스냅샷(멈춘 compileall의 스레드 상태, CPU,
+        # Defender 상태, site-packages 최근 파일, 로그)을 찍고, flet 전체를 종료한 뒤 같은 python으로
+        # compileall을 직접 다시 돌려(120초 제한) 어느 파일에서 멈추는지 확인하고 단계를 실패시킨다.
         shell: pwsh
         run: |
           $out = Join-Path $PWD 'flet_build.out.log'
           $err = Join-Path $PWD 'flet_build.err.log'
+          $siteDir = Join-Path $PWD 'stage\build\site-packages'
           $flet = (Get-Command flet).Source
           $p = Start-Process -FilePath $flet -ArgumentList 'build','windows','stage','--yes','--verbose' `
             -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru
           $null = $p.Handle  # 종료 코드를 읽을 수 있게 핸들을 잡아 둔다
           $sw = [Diagnostics.Stopwatch]::StartNew()
-          $snap = $false
+          $script:stuckPid = $null
+          $script:stuckExe = $null
 
           function Show-Logs([int]$n = 0) {
             foreach ($f in @($out, $err)) {
@@ -248,7 +273,7 @@ jobs:
             Write-Host "--- python 프로세스 ---"
             $procs | ForEach-Object {
               $gp = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
-              [pscustomobject]@{ PID = $_.ProcessId; PPID = $_.ParentProcessId; CPU = $gp.CPU; Start = $gp.StartTime; Cmd = $_.CommandLine }
+              [pscustomobject]@{ PID = $_.ProcessId; PPID = $_.ParentProcessId; CPU = $gp.CPU; Start = $gp.StartTime; Exe = $_.ExecutablePath; Cmd = $_.CommandLine }
             } | Format-List
             Write-Host "--- CPU 시간 5초 간격 2회 ---"
             $a = @{}; foreach ($x in $procs) { $a[$x.ProcessId] = (Get-Process -Id $x.ProcessId -ErrorAction SilentlyContinue).CPU }
@@ -258,33 +283,97 @@ jobs:
               $state = if ($null -eq $b) { '종료됨' } elseif ($b -gt $a[$x.ProcessId]) { '실행 중(CPU 증가)' } else { '멈춤(CPU 그대로)' }
               Write-Host ("PID {0}: {1} -> {2} : {3}" -f $x.ProcessId, $a[$x.ProcessId], $b, $state)
             }
-            $sp = 'stage/build/site-packages'
-            if (Test-Path $sp) {
-              Write-Host "--- $sp 최근 수정 파일 20개 ---"
-              Get-ChildItem $sp -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+
+            $stuck = $procs | Where-Object { $_.CommandLine -match 'compileall' } | Select-Object -First 1
+            if ($stuck) {
+              $script:stuckPid = $stuck.ProcessId
+              $script:stuckExe = $stuck.ExecutablePath
+              Write-Host "--- 멈춘 compileall PID $($stuck.ProcessId) 스레드 ---"
+              $threads = (Get-Process -Id $stuck.ProcessId -ErrorAction SilentlyContinue).Threads
+              if ($threads) {
+                $threads | ForEach-Object {
+                  [pscustomobject]@{ Id = $_.Id; ThreadState = $_.ThreadState; WaitReason = $(if ($_.ThreadState -eq 'Wait') { $_.WaitReason } else { '' }) }
+                } | Format-Table -AutoSize | Out-String | Write-Host
+              } else { Write-Host "스레드 정보를 읽지 못했습니다." }
+            } else {
+              Write-Host "--- compileall 프로세스 없음 (flet이 다른 단계에서 멈춘 것일 수 있음) ---"
+            }
+            try { Write-Host "Defender RealTimeProtectionEnabled: $((Get-MpComputerStatus).RealTimeProtectionEnabled)" }
+            catch { Write-Host "Get-MpComputerStatus 실패: $($_.Exception.Message)" }
+
+            if (Test-Path $siteDir) {
+              Write-Host "--- site-packages 최근 수정 파일 20개 ---"
+              Get-ChildItem $siteDir -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
                 Select-Object -First 20 FullName, LastWriteTime | Format-Table -AutoSize -Wrap | Out-String -Width 250 | Write-Host
-              $pyc = @(Get-ChildItem $sp -Recurse -File -Filter *.pyc -ErrorAction SilentlyContinue).Count
+              $pyc = @(Get-ChildItem $siteDir -Recurse -File -Filter *.pyc -ErrorAction SilentlyContinue).Count
               Write-Host ".pyc 총 개수: $pyc"
             } else {
-              Write-Host "$sp 없음"
+              Write-Host "$siteDir 없음"
             }
             Show-Logs 30
           }
 
-          while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 480) {
-            Start-Sleep -Seconds 15
-            if (-not $snap -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -ge 240) {
-              $snap = $true
-              Show-Snapshot
-            }
-          }
+          while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 240) { Start-Sleep -Seconds 15 }
 
           if (-not $p.HasExited) {
-            Write-Host "##### 8분 초과 — flet과 자식 프로세스를 종료합니다 #####"
-            if (-not $snap) { Show-Snapshot }
+            Show-Snapshot
+            # 멈춘 compileall만이 아니라 flet 전체를 종료한다.
+            Write-Host "##### flet과 자식 프로세스를 종료합니다 #####"
             taskkill /T /F /PID $p.Id
-            Show-Logs 30
-            throw "flet build가 8분 안에 끝나지 않아 종료했습니다."
+            if ($script:stuckPid) { taskkill /F /PID $script:stuckPid 2>$null }
+
+            if ($script:stuckExe) {
+              Write-Host "##### 같은 python으로 compileall 재실행: $script:stuckExe #####"
+              @'
+          import collections, os, re, subprocess, sys, threading, time
+
+          exe, target = sys.argv[1], sys.argv[2]
+
+          r = subprocess.run([exe, "-c", "import sitecustomize; print(sitecustomize.__file__)"],
+                             capture_output=True, text=True)
+          if r.returncode == 0 and r.stdout.strip():
+              path = r.stdout.strip()
+              print(f"sitecustomize.py: {path} (앞 40줄)")
+              with open(path, encoding="utf-8", errors="replace") as fh:
+                  for i, line in enumerate(fh):
+                      if i >= 40:
+                          break
+                      print("  | " + line.rstrip())
+          else:
+              print("sitecustomize.py: 없음")
+
+          last = collections.deque(maxlen=20)
+          proc = subprocess.Popen([exe, "-u", "-m", "compileall", "-b", "-f", target],
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                  text=True, errors="replace", bufsize=1)
+          def pump():
+              for line in proc.stdout:
+                  last.append(line.rstrip(chr(10)))
+          th = threading.Thread(target=pump, daemon=True)
+          th.start()
+          t = time.time()
+          try:
+              rc = proc.wait(timeout=120)
+          except subprocess.TimeoutExpired:
+              rc = "TIMEOUT"
+              proc.kill()
+              proc.wait()
+          th.join(5)
+          print(f"compileall -b -f: {time.time() - t:.1f}s rc={rc}", flush=True)
+          print("--- last 20 lines ---")
+          print(chr(10).join(last))
+          files = [m.group(1) for l in last for m in [re.match(r"Compiling '(.+?)'", l)] if m]
+          if files:
+              f = files[-1].replace(chr(92) * 2, chr(92))
+              size = os.path.getsize(f) if os.path.exists(f) else "?"
+              print(f"마지막 Compiling 파일: {f}")
+              print(f"파일 크기: {size} bytes")
+          '@ | Set-Content rerun_compileall.py -Encoding utf8
+              python rerun_compileall.py $script:stuckExe $siteDir
+            } else {
+              Write-Host "멈춘 compileall을 찾지 못해 재실행을 건너뜁니다."
+            }
+            throw "flet build가 4분 안에 끝나지 않아 스냅샷·compileall 재실행 후 종료했습니다."
           }
 
           $p.WaitForExit()
