@@ -31,7 +31,7 @@
    "archetype": "call_to_action"
   }
  ],
- "layout_default": "classic",
+ "layout_default": "onjaram-trust",
  "llm_structure": "1장 cover, 2장 event_info(body_content는 한 줄에 '라벨: 값' — 원문에 있는 항목만), 3장 body(신청 방법), 마지막 call_to_action. 원문에 없는 날짜·금액·혜택은 절대 만들지 말 것",
  "fit_check": {
   "need_any": [

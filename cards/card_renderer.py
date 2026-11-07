@@ -18,6 +18,7 @@ from cards import brand as bk
 from cards import design_templates
 from cards import emphasis
 from cards.fonts import wrap_text_balanced
+from cards.layout_onjaram import OnjaramLayoutMixin
 from cards.layout_tri import TriLayoutMixin
 
 logger = logging.getLogger(__name__)
@@ -69,7 +70,7 @@ def make_qr(elements: BrandElements) -> Optional[Image.Image]:
     return None
 
 
-class CardNewsRendererService(TriLayoutMixin):
+class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin):
     """고해상도 카드뉴스 (1080x1350) 자동 렌더링 서비스"""
 
     WIDTH = 1080
@@ -133,7 +134,7 @@ class CardNewsRendererService(TriLayoutMixin):
         design = design_templates.get(storyboard.design_id)
         if self.FOLLOW_ASPECT:       # 카드 크기: 3단 디자인만 높이를 바꾼다(쇼츠가 자기 높이로 그릴 때는 따르지 않는다)
             from cards.schema import CARD_ASPECTS
-            self.HEIGHT = CARD_ASPECTS.get(getattr(storyboard, "aspect", "4:5"), 1350) if design.layout == "tri" else 1350
+            self.HEIGHT = CARD_ASPECTS.get(getattr(storyboard, "aspect", "4:5"), 1350) if design.layout in ("tri", "oj") else 1350
         ctx = _Ctx(kit, storyboard.brand_elements, index, total, slide, design)
         img = await asyncio.to_thread(self._draw, ctx, photo)
         img.save(out_path, "PNG")
@@ -181,7 +182,7 @@ class CardNewsRendererService(TriLayoutMixin):
     def _draw(self, ctx: "_Ctx", photo: Optional[Image.Image]) -> Image.Image:
         """카드 한 장 그리기. 디자인 템플릿의 제목·본문 글꼴을 이 그리기 동안만 적용"""
         token = use_fonts(ctx.design.heading_font, ctx.design.body_font)
-        scale_token = None if ctx.design.layout == "tri" else use_text_scale(ctx.title_scale, ctx.body_scale)
+        scale_token = None if ctx.design.layout in ("tri", "oj") else use_text_scale(ctx.title_scale, ctx.body_scale)
         legible_token = use_legible(True)
         try:
             clean, terms = emphasis.parse(ctx.slide.lead_headline)   # *강조어* → 별표 지우고 강조어 기억
@@ -218,6 +219,8 @@ class CardNewsRendererService(TriLayoutMixin):
         t = ctx.slide.slide_type
         if ctx.design.layout == "tri":
             return self._layout_tri(ctx, photo)
+        if ctx.design.layout == "oj":
+            return self._layout_oj(ctx, photo)
         if t in self._ALIASES and ctx.design.layout != "tri":
             ctx = _Ctx(ctx.kit, ctx.el, ctx.index, ctx.total,
                        ctx.slide.model_copy(update={"slide_type": self._ALIASES[t]}), ctx.design)

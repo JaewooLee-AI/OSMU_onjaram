@@ -140,7 +140,7 @@ def slide_fingerprint(sb: EditableStoryboard, index: int) -> str:
     c = sb.card_slides[index]
     asset = sb.asset(c.asset_id)
     parts = [sb.design_id, c.slide_type, c.lead_headline, c.body_content, c.takeaway, c.stat_value, c.stat_label,
-             c.asset_id, asset.path if asset else "", c.text_position, c.comparison_table, c.style, sb.aspect]
+             c.asset_id, asset.path if asset else "", c.text_position, c.comparison_table, c.style, sb.aspect, c.qr_image, c.qr_caption, c.promo_badge]
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, default=str).encode()).hexdigest()[:12]
 
 

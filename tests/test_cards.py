@@ -96,7 +96,7 @@ def test_plan_rule_based_without_llm():
     assert [s.slide_type for s in sb.card_slides] == ["cover", "numbered", "numbered", "numbered", "call_to_action"]
     cta = sb.card_slides[-1]
     assert "055-255-1365" in cta.body_content and "onjaram@naver.com" in cta.body_content  # 연락처는 킷 값
-    assert sb.card_format == "info_summary" and sb.design_id == "tri-2-5-3"
+    assert sb.card_format == "info_summary" and sb.design_id == "onjaram-warm"
 
 
 def test_plan_llm_forces_structure_blacklist_and_fixed_cta(monkeypatch):
@@ -229,3 +229,42 @@ def test_brand_palettes_apply_to_every_design_and_render(tmp_path, monkeypatch):
     # 내장 디자인의 기본 색도 더 이상 브랜드 밖의 색(하늘색·주황)이 아니다
     for did in ("gov", "color_block", "poster"):
         assert set(design_templates.get(did).colors.values()) <= brand | {"#E6ECF4"}
+
+
+def test_onjaram_layout_renders_all_slide_types_and_cta_extras(tmp_path):
+    """온자람 전용 디자인: 모든 카드 종류가 그려지고, 마지막 안내 카드는 QR·할인 배지를 붙이면 모양이 달라진다."""
+    import asyncio
+    from PIL import Image
+    from cards.card_renderer import CardNewsRendererService
+    from cards.schema import CardSlide, EditableStoryboard
+    kinds = ["cover", "body", "numbered", "steps", "checklist", "qa", "quote", "big_number", "comparison_table", "event_info", "call_to_action", "single"]
+    slides = [CardSlide(slide_number=i + 1, slide_type=k, lead_headline="요즘 *마음*이 자꾸 무겁다면", body_content="1. 숨 쉬기\n2. 쉬어 가기\n3. 물 마시기\n4. 걷기",
+                        takeaway="천천히, 한 단계씩", stat_value="3가지", stat_label="오늘의 실천",
+                        comparison_table={"항목": ["혼자", "함께"], "부담": ["큼", "나눔"]}) for i, k in enumerate(kinds)]
+    for design in ("onjaram-warm", "onjaram-trust", "onjaram-warm@navy"):
+        sb = EditableStoryboard(title="t", target_audience="", tone_and_manner="", visual_style="", is_anonymized=False,
+                                card_slides=slides, sns_caption="", design_id=design)
+        out = tmp_path / design.replace("@", "_")
+        paths = asyncio.run(CardNewsRendererService(export_dir=str(out)).render_all_slides(sb))
+        assert len(paths) == len(kinds)
+        assert all(Image.open(p).size == (1080, 1350) for p in paths)
+    qr = tmp_path / "qr.png"
+    Image.new("RGB", (200, 200), "black").save(qr)
+    cta = slides[kinds.index("call_to_action")]
+    plain = Image.open(paths[kinds.index("call_to_action")]).convert("RGB")
+    sb.card_slides = [cta.model_copy(update={"qr_image": str(qr), "promo_badge": "청년 5회기 할인"})]
+    p2 = asyncio.run(CardNewsRendererService(export_dir=str(tmp_path / "qr")).render_all_slides(sb))[0]
+    with_extras = Image.open(p2).convert("RGB")
+    from PIL import ImageChops
+    assert ImageChops.difference(plain, with_extras).getbbox() is not None
+    assert with_extras.getpixel((120, 800)) == (0, 0, 0) or with_extras.getbbox() is not None
+
+
+def test_slide_fingerprint_changes_with_qr_and_badge():
+    from flet_app.views.card_studio import slide_fingerprint
+    from cards.schema import CardSlide, EditableStoryboard
+    sb = EditableStoryboard(title="t", target_audience="", tone_and_manner="", visual_style="", is_anonymized=False, sns_caption="",
+                            card_slides=[CardSlide(slide_number=1, slide_type="call_to_action", lead_headline="a", body_content="b", takeaway="c")])
+    before = slide_fingerprint(sb, 0)
+    sb.card_slides[0].promo_badge = "할인"
+    assert slide_fingerprint(sb, 0) != before

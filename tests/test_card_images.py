@@ -93,7 +93,9 @@ def test_estimate_uses_registered_image_price():
 
 
 def test_slot_aspect_follows_template_zone():
-    assert images.slot_aspect(_plan()) == "3:2"                    # tri 2:5:3 가운데 영역 1080x675
+    sb0 = _plan()
+    sb0.design_id = "tri-2-5-3"
+    assert images.slot_aspect(sb0) == "3:2"                        # tri 2:5:3 가운데 영역 1080x675
     sb = _plan()
     sb.design_id = "tri-1-1-1"
     assert images.slot_aspect(sb) == "16:9"

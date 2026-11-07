@@ -28,7 +28,7 @@
    "archetype": "call_to_action"
   }
  ],
- "layout_default": "tri-2-5-3",
+ "layout_default": "onjaram-warm",
  "llm_structure": "1장 cover, 원문에 있는 수치마다 big_number 카드(stat_value에 원문 수치 그대로, stat_label에 한 줄 설명), 마지막 call_to_action. 원문에 없는 숫자는 만들지 말 것",
  "min_numbers": 2,
  "shorts": {

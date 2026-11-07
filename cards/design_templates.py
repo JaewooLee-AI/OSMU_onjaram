@@ -35,12 +35,15 @@ class DesignTemplate(BaseModel):
     body_font: str = Field(default="", description="본문 글꼴 ID (비우면 기본)")
     image_aspect: str = Field(default="4:5", description="AI 그림 화면비 (그림 영역 모양에 맞춤: 일러스트형은 가로로 넓은 16:9)")
     ratio: List[int] = Field(default_factory=lambda: [2, 5, 3], description="tri(3단) 레이아웃의 위:가운데:아래 높이 비율")
+    variant: str = Field(default="warm", description="oj(온자람 전용) 레이아웃의 변형: warm(공감·회복) | trust(전문·신뢰)")
     tri_theme: str = Field(default="light", description="tri 레이아웃 색: light(브랜드 밝은 배경) | dark(어두운 배경)")
 
     def uses_photo(self, slide_type: str) -> bool:
         """이 디자인에서 그 종류의 카드가 사진·그림을 쓰는지 (안 쓰는 카드는 AI 그림을 만들지 않아 비용을 아낌)"""
         if self.layout == "tri":   # 사진·영상 자리가 있는 모양: 인포그래픽 종류는 사진 없이 그린다
             return slide_type not in ("numbered", "steps", "checklist", "big_number", "comparison_table", "event_info")
+        if self.layout == "oj":   # 온자람 전용: 표지·본문류만 사진 칸이 있고 나머지는 카드 안에서 그린다
+            return slide_type in ("cover", "body", "single", "quote", "qa")
         if self.layout in ("typo", "gov"):
             return False   # AI 그림을 만들지 않음 (첨부 사진만 사용)
         if self.layout in ("color_block", "poster"):
@@ -54,6 +57,14 @@ class DesignTemplate(BaseModel):
 
 
 BUILTINS: List[DesignTemplate] = [
+    DesignTemplate(id="onjaram-warm", name="온자람 · 공감·회복 (세이지 + 크림, 세리프 제목)", builtin=True, layout="oj", variant="warm", radius=32,
+                   heading_font="gowunbatang", ratio=[2, 5, 3],
+                   description="브랜드 킷 문서의 비주얼 규칙을 옮긴 개인 상담·청년·학부모용 모양. 크림 바탕에 세이지 그린, 핵심어만 코랄로 강조하고 "
+                               "위 카테고리 태그·아래 워터마크·연락처를 모든 카드에 고정합니다. 마지막 카드는 전화번호를 크게 보여 줍니다.",
+                   colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="onjaram-trust", name="온자람 · 전문·신뢰 (네이비 + 크림, 번호 칸·인증 배지)", builtin=True, layout="oj", variant="trust", radius=14,
+                   description="기업 EAP·학교·관공서 대상의 단정한 모양. 딥 네이비 주조색, 번호 칸과 각진 상자, 사회적기업 인증 배지를 보여 줍니다.",
+                   colors={"primary": "#2C4A6F", "secondary": "#2C4A6F", "accent": "#E07A5F", "background": "#FAF8F5"}),
     DesignTemplate(id="tri-2-5-3", name="3단 (위 제목 · 가운데 사진/인포그래픽 · 아래 소속) 2:5:3", builtin=True, layout="tri",
                    ratio=[2, 5, 3], radius=32,
                    description="위에 제목, 가운데에 사진·영상 또는 번호 단계 인포그래픽, 아래에 한 줄 요약과 소속·연락처. "

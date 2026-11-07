@@ -55,6 +55,9 @@ class CardSlide(BaseModel):
     stat_label: str = Field(default="", description="빅넘버 숫자의 설명")
     asset_locked: bool = Field(default=False, description="사용자가 사진을 직접 골랐거나 '사진 없음'을 골라 자동 배치·AI 생성이 건드리지 않는 카드")
     style: Dict[str, Any] = Field(default_factory=dict, description="이 카드만의 모양 덮어쓰기(말로 고치기): bg·fg·accent(#RRGGBB), title_scale·body_scale·takeaway_scale(0.6~1.6)")
+    qr_image: str = Field(default="", description="이 카드(마지막 안내)에 넣을 QR 이미지 경로 — 카드 다듬기에서 사용자가 올림, 비우면 QR 없음")
+    qr_caption: str = Field(default="", description="QR 옆 안내 문구(비우면 기본 문구)")
+    promo_badge: str = Field(default="", description="마지막 안내 카드의 할인·혜택 배지 문구(예: 청년 5회기 할인) — 사용자가 입력, 비우면 배지 없음")
     text_position: str = Field(default="top", description="사진 배경 카드에서 글씨 위치: top(위) | bottom(아래)")
 
 class ShortsScene(BaseModel):

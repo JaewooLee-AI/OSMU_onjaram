@@ -32,7 +32,7 @@
    "archetype": "call_to_action"
   }
  ],
- "layout_default": "tri-2-5-3",
+ "layout_default": "onjaram-warm",
  "llm_structure": "1장 cover, steps 카드 1장(전체 단계 3~5개 요약), 필요하면 단계별 body, 마지막 call_to_action. 가격·회기·할인은 [브랜드 팩트]에 있는 그대로만 쓰고 없으면 쓰지 말 것",
  "fit_check": {
   "need_any": [

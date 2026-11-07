@@ -53,6 +53,8 @@ def slot_aspect(sb: EditableStoryboard) -> str:
         parts = [max(1, int(x)) for x in (design.ratio or [2, 5, 3])[:3]]
         from cards.schema import CARD_ASPECTS
         ratio = 1080 / (CARD_ASPECTS.get(getattr(sb, "aspect", "4:5"), 1350) * parts[1] / sum(parts))
+    elif design.layout == "oj":    # 온자람 전용: 표지·본문의 사진 칸은 폭 940 x 높이 약 450의 가로로 넓은 모양
+        ratio = 940 / 450
     else:
         w, _, h = (design.image_aspect or "4:5").partition(":")
         ratio = float(w) / float(h or 1)

@@ -303,6 +303,10 @@ def _import_work(conn, work: dict) -> str:
                 moved = _rebase(a.get("path"), src_root, DATA_DIR)
                 if moved:
                     a["path"] = moved
+            for slide in sb.get("card_slides") or []:     # 카드 다듬기에서 올린 QR 이미지도 받는 PC 경로로 고친다
+                moved = _rebase(slide.get("qr_image"), src_root, DATA_DIR) if slide.get("qr_image") else None
+                if moved:
+                    slide["qr_image"] = moved
         encoded = repo._encode(row, repo._CAMPAIGN_JSON_COLS, ())
         cols = list(encoded)
         conn.execute(f"insert into campaigns ({', '.join(cols)}) values ({', '.join('?' * len(cols))})", tuple(encoded.values()))
