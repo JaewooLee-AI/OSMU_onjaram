@@ -220,7 +220,77 @@ jobs:
           python-version: "3.12"
 
       - name: flet build windows
-        run: flet build windows stage --yes --verbose
+        # 진단용으로 flet build를 백그라운드로 실행하고 최대 8분 기다린다(임시 — 원인을 찾으면 원래의
+        # `flet build windows stage --yes --verbose` 한 줄로 되돌린다). 4분이 지나도 안 끝나면 프로세스·
+        # site-packages 스냅샷을 찍고, 8분이 되면 flet과 자식 프로세스를 모두 죽이고 단계를 실패시킨다.
+        # 8분 안에 끝나면 flet의 종료 코드를 그대로 단계 결과로 넘긴다.
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD 'flet_build.out.log'
+          $err = Join-Path $PWD 'flet_build.err.log'
+          $flet = (Get-Command flet).Source
+          $p = Start-Process -FilePath $flet -ArgumentList 'build','windows','stage','--yes','--verbose' `
+            -RedirectStandardOutput $out -RedirectStandardError $err -NoNewWindow -PassThru
+          $null = $p.Handle  # 종료 코드를 읽을 수 있게 핸들을 잡아 둔다
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $snap = $false
+
+          function Show-Logs([int]$n = 0) {
+            foreach ($f in @($out, $err)) {
+              Write-Host "===== $(Split-Path $f -Leaf) $(if ($n) { "(마지막 $n줄)" }) ====="
+              if (Test-Path $f) { if ($n) { Get-Content $f -Tail $n } else { Get-Content $f } }
+            }
+          }
+
+          function Show-Snapshot {
+            Write-Host "##### 스냅샷 ($([int]$sw.Elapsed.TotalSeconds)초 경과) #####"
+            $procs = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'python*' })
+            Write-Host "--- python 프로세스 ---"
+            $procs | ForEach-Object {
+              $gp = Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue
+              [pscustomobject]@{ PID = $_.ProcessId; PPID = $_.ParentProcessId; CPU = $gp.CPU; Start = $gp.StartTime; Cmd = $_.CommandLine }
+            } | Format-List
+            Write-Host "--- CPU 시간 5초 간격 2회 ---"
+            $a = @{}; foreach ($x in $procs) { $a[$x.ProcessId] = (Get-Process -Id $x.ProcessId -ErrorAction SilentlyContinue).CPU }
+            Start-Sleep -Seconds 5
+            foreach ($x in $procs) {
+              $b = (Get-Process -Id $x.ProcessId -ErrorAction SilentlyContinue).CPU
+              $state = if ($null -eq $b) { '종료됨' } elseif ($b -gt $a[$x.ProcessId]) { '실행 중(CPU 증가)' } else { '멈춤(CPU 그대로)' }
+              Write-Host ("PID {0}: {1} -> {2} : {3}" -f $x.ProcessId, $a[$x.ProcessId], $b, $state)
+            }
+            $sp = 'stage/build/site-packages'
+            if (Test-Path $sp) {
+              Write-Host "--- $sp 최근 수정 파일 20개 ---"
+              Get-ChildItem $sp -Recurse -File -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending |
+                Select-Object -First 20 FullName, LastWriteTime | Format-Table -AutoSize -Wrap | Out-String -Width 250 | Write-Host
+              $pyc = @(Get-ChildItem $sp -Recurse -File -Filter *.pyc -ErrorAction SilentlyContinue).Count
+              Write-Host ".pyc 총 개수: $pyc"
+            } else {
+              Write-Host "$sp 없음"
+            }
+            Show-Logs 30
+          }
+
+          while (-not $p.HasExited -and $sw.Elapsed.TotalSeconds -lt 480) {
+            Start-Sleep -Seconds 15
+            if (-not $snap -and -not $p.HasExited -and $sw.Elapsed.TotalSeconds -ge 240) {
+              $snap = $true
+              Show-Snapshot
+            }
+          }
+
+          if (-not $p.HasExited) {
+            Write-Host "##### 8분 초과 — flet과 자식 프로세스를 종료합니다 #####"
+            if (-not $snap) { Show-Snapshot }
+            taskkill /T /F /PID $p.Id
+            Show-Logs 30
+            throw "flet build가 8분 안에 끝나지 않아 종료했습니다."
+          }
+
+          $p.WaitForExit()
+          Show-Logs
+          Write-Host "flet build 종료 코드: $($p.ExitCode) ($([int]$sw.Elapsed.TotalSeconds)초)"
+          if ($p.ExitCode -ne 0) { exit $p.ExitCode }
 
       - name: Inspect build (exe name, app folder, version)
         id: meta
