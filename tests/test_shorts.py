@@ -188,3 +188,20 @@ def test_tri_shorts_photo_motion_moves_only_the_photo_zone(tmp_path):
     mid = (0, 700, 1080, 1100)      # 가운데 사진 칸
     assert ImageChops.difference(a.crop(top), b.crop(top)).getbbox() is None
     assert ImageChops.difference(a.crop(mid), b.crop(mid)).getbbox() is not None
+
+
+def test_voice_estimate_uses_token_price_when_registered():
+    """TTS 공식 단가는 100만 토큰당이다 — 토큰 단가만 등록해도 실행 전 예상 금액이 나와야 한다('단가 미등록' 아님)."""
+    from types import SimpleNamespace
+    from flet_app.views.shorts_studio import describe_voice_estimate, estimate_voice
+
+    sb = SimpleNamespace(shorts_scenes=[SimpleNamespace(narration_script="가" * 130)])
+    ref = repo.upsert_model("google", "tts-est-x", "T", ["tts"])
+    repo.set_slot("tts", ref)
+    est = estimate_voice(sb)
+    assert est["usd"] is None and "단가 미등록" in describe_voice_estimate(est)
+
+    repo.save_model_price("google", "tts-est-x", 0.5, 9.0)
+    est = estimate_voice(sb)
+    assert est["usd"] is not None and est["usd"] > 0 and "예상 약 $" in describe_voice_estimate(est)
+    assert est["basis"] == "토큰 단가 기준 어림"

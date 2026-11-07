@@ -29,14 +29,33 @@ def _u(control) -> None:
         pass
 
 
+# 음성 합성 예상 비용의 어림값: 공식 가격표는 TTS를 100만 토큰당(입력=글자, 출력=오디오)으로 적는다.
+# 한국어는 글자 1개가 대체로 1토큰 안팎이고, Gemini 오디오 출력은 초당 약 25토큰이다.
+TTS_INPUT_TOKENS_PER_CHAR = 1.0
+TTS_OUTPUT_TOKENS_PER_SEC = 25
+
+
 def estimate_voice(sb) -> dict:
-    """음성 합성 예상: 대본 글자 수 → 초 → (등록 단가가 있으면) 금액."""
+    """음성 합성 예상: 대본 글자 수 → 초 → (등록 단가가 있으면) 금액.
+    토큰 단가(입력·출력 100만 토큰당)가 있으면 그것으로, 없으면 초당 단가로 계산합니다."""
     chars = sum(len((s.narration_script or "").strip()) for s in sb.shorts_scenes)
     seconds = chars / shorts_script.CHARS_PER_SEC
     model = repo.resolve_slot_model("tts")
     per = model.get("per_second") if model else None
-    return {"chars": chars, "seconds": seconds, "model": model, "per_second": per,
-            "usd": (seconds * per) if per is not None else None}
+    usd = None
+    basis = ""
+    price = repo.get_model_price(model["vendor"], model["model_id"]) if model else None
+    if price is not None:
+        in_tok = int(chars * TTS_INPUT_TOKENS_PER_CHAR)
+        out_tok = int(seconds * TTS_OUTPUT_TOKENS_PER_SEC)
+        row = {"input_per_mtok": price.get("input_per_mtok"), "output_per_mtok": price.get("output_per_mtok"),
+               "cached_input_per_mtok": price.get("cached_input_per_mtok")}
+        usd = repo.compute_cost_usd(row, in_tok, out_tok)
+        basis = "토큰 단가 기준 어림"
+    if usd is None and per is not None:
+        usd = seconds * per
+        basis = "초당 단가 기준"
+    return {"chars": chars, "seconds": seconds, "model": model, "per_second": per, "usd": usd, "basis": basis}
 
 
 def describe_voice_estimate(est: dict) -> str:
@@ -44,8 +63,8 @@ def describe_voice_estimate(est: dict) -> str:
     if est["model"] is None:
         return f"{head} · '음성 내레이션' 모델이 없어 무료 음성(gTTS)으로 만듭니다(품질 낮음)."
     if est["usd"] is None:
-        return f"{head} · 음성 모델 {est['model']['display_name']} · 단가 미등록(모델 등록에서 초당 단가를 입력하면 예상 금액이 보입니다)"
-    return f"{head} · 음성 모델 {est['model']['display_name']} · 예상 ${est['usd']:.3f}"
+        return f"{head} · 음성 모델 {est['model']['display_name']} · 단가 미등록(모델 등록에서 음성 모델의 입력·출력 단가를 입력하면 예상 금액이 보입니다)"
+    return f"{head} · 음성 모델 {est['model']['display_name']} · 예상 약 ${est['usd']:.3f} ({est.get('basis') or '등록 단가'})"
 
 
 MOTION_OPTIONS = {

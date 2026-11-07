@@ -436,7 +436,7 @@ def test_shorts_tab_needs_cards_then_converts_estimates_and_renders(populated, t
     assert saved.shorts_scenes and saved.shorts_scenes[-1].section_type == "conclusion"
     tab = shorts_studio.build_shorts_tab(page, repo.get_campaign(cid), 1.0)
     text = " ".join(str(getattr(c, "value", "")) for c in _find_all(tab, lambda c: isinstance(c, ft.Text)))
-    assert "예상 $" in text                                          # 실행 전 음성 예상 비용
+    assert "예상 약 $" in text                                          # 실행 전 음성 예상 비용
     render = _find_all(tab, lambda c: _label(c) == "쇼츠 영상 만들기")[0]
     render.on_click(None)
     assert shown and "예상" in shown[-1].content.value               # 확인 창이 먼저 뜬다
