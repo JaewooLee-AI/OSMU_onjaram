@@ -224,7 +224,7 @@ jobs:
           if (-not (Test-Path (Join-Path $dir 'unins000.exe'))) { throw "재설치 후 제거 프로그램이 없습니다" }
           if ((Desktop-Links).Count -ne $before + 1) { throw "재설치 후 바탕화면 아이콘 수가 맞지 않습니다" }
           $entries = @(Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall' |
-            Where-Object { $_.PSChildName -like '*34EEB406-6A85-453A-B114-1F82B055A174*' })
+            Where-Object { $_.PSChildName -like '*BA9BDA9F-E3C6-49AB-A556-3F6AA7860FDA*' })
           if ($entries.Count -ne 1) { throw "'설치된 앱' 목록 항목이 1개가 아닙니다: $($entries.Count)" }
           Check-UserData '재설치'
           Write-Host "재설치 OK (옛 파일 정리, 아이콘·제거 항목 1개, 사용자 데이터 유지)"
