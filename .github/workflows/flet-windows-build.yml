@@ -35,6 +35,10 @@ on:
         description: "flet build 전에 stage 폴더·python.exe를 Defender 실시간 검사 제외에 추가(진단용)"
         type: boolean
         default: false
+      without_pywin32:
+        description: "stage/pyproject.toml에서 pywin32 의존성 줄을 빼고 빌드(진단용, 원본 pyproject.toml은 그대로)"
+        type: boolean
+        default: false
 
 # 릴리스 생성(아래 Publish GitHub Release 스텝)에 필요한 권한.
 permissions:
@@ -121,6 +125,21 @@ jobs:
           Copy-Item -Recurse -Path flet_app/assets -Destination stage/assets
           Write-Host "----- stage/ 트리 -----"
           Get-ChildItem -Recurse stage | Select-Object -First 80 FullName | Format-Table -AutoSize
+
+      - name: Diagnostic - remove pywin32 from stage/pyproject.toml (temporary, workflow_dispatch input)
+        # without_pywin32를 true로 고르면 stage 안의 pyproject.toml에서만 pywin32 줄을 지운다.
+        # 저장소의 원본 flet_app/pyproject.toml은 건드리지 않는다. 멈춤이 pywin32 때문인지 가리는 용도다.
+        if: ${{ inputs.without_pywin32 }}
+        shell: pwsh
+        run: |
+          $f = 'stage/pyproject.toml'
+          $lines = @(Get-Content $f -Encoding utf8)
+          $drop = @($lines | Where-Object { $_ -match '^\s*"pywin32\b' })
+          if ($drop.Count -ne 1) { throw "pywin32 의존성 줄이 1개가 아닙니다($($drop.Count)개) — pyproject.toml 구조를 확인하세요." }
+          $lines | Where-Object { $_ -notmatch '^\s*"pywin32\b' } | Set-Content $f -Encoding utf8NoBOM
+          Write-Host "stage/pyproject.toml에서 pywin32 줄을 제거했습니다: $($drop[0].Trim())"
+          Write-Host "----- 남은 dependencies -----"
+          Select-String -Path $f -Pattern '^\s*"[^"]+",?\s*$' | ForEach-Object { $_.Line }
 
       # flet build의 로그(build_python_3.14.7)를 보면 flet은 Python 3.14로 의존성을 설치·컴파일한다.
       # 아래 진단 스텝도 같은 3.14로 돌리고, 끝나면 3.12를 다시 설정해 이후 스텝(flet build 등)은 그대로 3.12를 쓴다.
@@ -295,6 +314,10 @@ jobs:
                   [pscustomobject]@{ Id = $_.Id; ThreadState = $_.ThreadState; WaitReason = $(if ($_.ThreadState -eq 'Wait') { $_.WaitReason } else { '' }) }
                 } | Format-Table -AutoSize | Out-String | Write-Host
               } else { Write-Host "스레드 정보를 읽지 못했습니다." }
+              Write-Host "--- 멈춘 compileall PID $($stuck.ProcessId)의 자식 프로세스 ---"
+              $kids = @(Get-CimInstance Win32_Process | Where-Object { $_.ParentProcessId -eq $stuck.ProcessId })
+              if ($kids.Count -eq 0) { Write-Host "(없음)" }
+              else { $kids | Select-Object Name, ProcessId, CommandLine | Format-List | Out-String -Width 250 | Write-Host }
             } else {
               Write-Host "--- compileall 프로세스 없음 (flet이 다른 단계에서 멈춘 것일 수 있음) ---"
             }
