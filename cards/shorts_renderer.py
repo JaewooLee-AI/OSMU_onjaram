@@ -138,23 +138,25 @@ class ShortsRendererService:
 
             await progress(0.5, "3단 프레임 그리는 중...")
             design = design_templates.get(storyboard.design_id)
-            if design.layout == "oj":   # 온자람 전용 디자인은 같은 색의 3단 프레임으로 그린다(경고 없음)
-                pal = design_templates.split_id(storyboard.design_id)[1] or ("navy" if design.variant == "trust" else "sage")
-                tri_id = f"tri-2-5-3@{pal}"
+            # 3단 디자인은 쇼츠용 3단 프레임으로, 그 밖의 디자인(온자람 등)은 카드를 그 디자인 그대로 9:16 화면 가운데 놓는다.
+            card_mode = design.layout != "tri"
+            tri_id = storyboard.design_id
+            if card_mode:
+                sb2 = storyboard
+                frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
             else:
-                tri_id = storyboard.design_id if design.layout == "tri" else "tri-2-5-3"
-            if tri_id != storyboard.design_id and design.layout != "oj":
-                self.last_warnings.append("카드 디자인이 3단이 아니어서 쇼츠는 기본 3단(2:5:3)으로 그렸습니다.")
-            sb2 = storyboard.model_copy(update={"design_id": tri_id})
-            frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
-            frames.HEIGHT, frames.safe_top, frames.safe_bottom = self.HEIGHT, 250, 250
-            frames.FOLLOW_ASPECT = False
+                sb2 = storyboard.model_copy(update={"design_id": tri_id})
+                frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
+                frames.HEIGHT, frames.safe_top, frames.safe_bottom = self.HEIGHT, 250, 250
+                frames.FOLLOW_ASPECT = False
             motion = self.options.photo_motion
             text_motion = self.options.text_motion != "none"
             use_trans = self.options.transition != "none" and len(timeline) > 1
             fps = self.FPS
             half = max(1, round(self.TRANSITION_SEC * fps / 2)) if use_trans else 0
             _, (m0, m1), _ = frames._tri_zones(design.ratio if design.layout == "tri" else [2, 5, 3])
+            if card_mode:
+                m0 = m1 = 0
             animated = motion != "none" or text_motion or use_trans
             listing, last, moved = [], None, 0
             seg_frames: List[Tuple[str, int]] = []
@@ -165,9 +167,11 @@ class ShortsRendererService:
                 idx = max(0, min(source, len(storyboard.card_slides)) - 1)
                 path = await frames.render_slide(sb2, idx)
                 dur = item["end"] - item["start"]
+                if card_mode:
+                    bg_path, card_path, cy, path = self._card_canvas(path, work_dir, f"{n:02d}")
                 if animated:
                     slide = storyboard.card_slides[idx]
-                    has_photo = bool(slide.asset_id and storyboard.asset(slide.asset_id)
+                    has_photo = (not card_mode) and bool(slide.asset_id and storyboard.asset(slide.asset_id)
                                      and slide.slide_type in ("cover", "body", "single", "quote")
                                      and design_templates.get(tri_id).uses_photo(slide.slide_type))
                     if motion == "alternate":
@@ -181,6 +185,15 @@ class ShortsRendererService:
                     tail = half if (use_trans and n < n_scenes - 1) else 0
                     n_frames = max(2, (e_f + tail) - (b_f - lead)) if use_trans else max(2, int(round(dur * fps)))
                     seg = os.path.join(work_dir, f"seg_{n:02d}.mp4")
+                    if card_mode:
+                        await self._card_scene_segment(bg_path, card_path, cy, n_frames, seg, motion, n, text_motion,
+                                                       delay=(lead / fps + 0.1) if text_motion else 0.0)
+                        moved += 1
+                        path = seg
+                        seg_frames.append((seg, n_frames))
+                        listing.append((path, dur))
+                        last = path
+                        continue
                     await self._tri_scene_segment(path, n_frames, seg, (m0, m1), has_photo and motion != "none", kind,
                                                   text_motion, delay=(lead / fps + 0.1) if text_motion else 0.0, tag=f"{n:02d}", work_dir=work_dir)
                     moved += 1 if (has_photo and motion != "none") else 0
@@ -188,7 +201,7 @@ class ShortsRendererService:
                     seg_frames.append((seg, n_frames))
                 listing.append((path, dur))
                 last = path
-            if motion != "none" and not moved:
+            if motion != "none" and not moved and not card_mode:
                 self.last_warnings.append("사진이 들어간 장면이 없어 움직임을 적용하지 못했습니다(카드에 사진을 넣으면 가운데 사진이 움직입니다).")
             video_in = None
             if use_trans:
@@ -268,6 +281,78 @@ class ShortsRendererService:
         bpath = os.path.join(work_dir, f"base_{tag}.png")
         base.save(bpath)
         return bpath, layers
+
+    def _card_canvas(self, card_path: str, work_dir: str, tag: str):
+        """카드(폭 1080)를 9:16 화면 가운데에 놓는다. 가장자리가 한 색이면 그 색으로, 아니면 카드를 흐리게 키운 것으로 바탕을 채운다.
+        반환: (바탕만 있는 PNG, 카드 PNG, 카드를 놓을 y, 바탕+카드를 합친 PNG)"""
+        W, H = self.WIDTH, self.HEIGHT
+        card = Image.open(card_path).convert("RGB")
+        if card.width != W:
+            card = card.resize((W, round(card.height * W / card.width)), Image.LANCZOS)
+        if card.height > H:
+            card = card.resize((round(card.width * H / card.height), H), Image.LANCZOS)
+        w, h = card.size
+        strips = [card.crop((0, 0, w, 4)), card.crop((0, h - 4, w, h)), card.crop((0, 0, 4, h)), card.crop((w - 4, 0, w, h))]
+        # 가장자리 네 줄이 거의 한 색이면(색이 조금씩 달라도 됨) 위→아래 색을 이은 단색 바탕, 아니면 카드를 흐리게 키운 바탕.
+        flat = all(max(hi - lo for lo, hi in st.getextrema()) <= 14 for st in strips)
+        if flat:
+            c_top = strips[0].resize((1, 1), Image.BOX).getpixel((0, 0))
+            c_bot = strips[1].resize((1, 1), Image.BOX).getpixel((0, 0))
+            col = Image.new("RGB", (1, 2))
+            col.putpixel((0, 0), c_top)
+            col.putpixel((0, 1), c_bot)
+            bg = col.resize((W, H), Image.BILINEAR)
+        else:
+            small = card.resize((max(1, w // 8), max(1, h // 8)))
+            bg = small.resize((W, H), Image.BILINEAR).filter(ImageFilter.GaussianBlur(24))
+            bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), 0.25)
+        y = (H - card.height) // 2
+        bg_path = os.path.join(work_dir, f"cbg_{tag}.png")
+        cp = os.path.join(work_dir, f"card_{tag}.png")
+        full = os.path.join(work_dir, f"cfull_{tag}.png")
+        bg.save(bg_path)
+        card.save(cp)
+        merged = bg.copy()
+        merged.paste(card, (0, y))
+        merged.save(full)
+        return bg_path, cp, y, full
+
+    CARD_MOTIONS = {  # 카드 모양 쇼츠의 화면 전체 움직임: (시작 확대, 끝 확대, 시작 x, 끝 x, 시작 y, 끝 y)
+        "zoom_in": (1.0, 1.06, 0.5, 0.5, 0.5, 0.5),
+        "zoom_out": (1.06, 1.0, 0.5, 0.5, 0.5, 0.5),
+        "dyn0": (1.0, 1.07, 0.35, 0.65, 0.55, 0.45),
+        "dyn1": (1.07, 1.0, 0.65, 0.35, 0.45, 0.55),
+    }
+
+    async def _card_scene_segment(self, bg_path: str, card_path: str, cy: int, frames: int, out: str, motion: str, n: int,
+                                  text_motion: bool, delay: float = 0.0) -> None:
+        """카드 한 장 → `frames`장짜리 H.264 조각. 카드는 바탕 위에 떠올라 나타나고(text_motion), 화면 전체가 천천히 확대·축소·이동한다(motion)."""
+        W, H, fps = self.WIDTH, self.HEIGHT, self.FPS
+        inputs = ["-loop", "1", "-framerate", str(fps), "-i", bg_path, "-loop", "1", "-framerate", str(fps), "-i", card_path]
+        chains = []
+        if text_motion:
+            d_sec, px = self.TEXT_SLIDE_SEC, self.TEXT_SLIDE_PX
+            chains.append(f"[1:v]format=rgba,fade=t=in:st={delay:.3f}:d={d_sec}:alpha=1[cd]")
+            off = f"{px}*pow(clip(1-(t-{delay:.3f})/{d_sec},0,1),3)"
+            chains.append(f"[0:v][cd]overlay=x=0:y='{cy}+{off}':eval=frame:shortest=1[c0]")
+        else:
+            chains.append(f"[0:v][1:v]overlay=x=0:y={cy}:shortest=1[c0]")
+        if motion != "none":
+            key = {"zoom_in": "zoom_in", "zoom_out": "zoom_out", "alternate": "zoom_in" if n % 2 == 0 else "zoom_out",
+                   "dynamic": f"dyn{n % 2}"}.get(motion, "zoom_in" if n % 2 == 0 else "zoom_out")
+            z0, z1, x0, x1, y0, y1 = self.CARD_MOTIONS[key]
+            p = f"(on/{max(1, frames - 1)})"
+            e = f"({p}*{p}*(3-2*{p}))"
+            chains.append(f"[c0]scale={W * 2}:{H * 2},zoompan=z='{z0}+({z1 - z0:.4f})*{e}':"
+                          f"x='(iw-iw/zoom)*({x0}+({x1 - x0:.4f})*{e})':y='(ih-ih/zoom)*({y0}+({y1 - y0:.4f})*{e})':"
+                          f"d=1:s={W}x{H}:fps={fps},setsar=1[c1]")
+            cur = "c1"
+        else:
+            cur = "c0"
+        chains.append(f"[{cur}]setsar=1,format=yuv420p[v]")
+        cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(chains), "-map", "[v]",
+               "-frames:v", str(frames), "-pix_fmt", "yuv420p", *ffmpeg_tools.h264_args("good", "veryfast"), "-r", str(fps), out]
+        await self._run(cmd, "카드 움직임 조각 생성 실패")
 
     async def _tri_scene_segment(self, frame_path: str, frames: int, out: str, zone, photo_moves: bool, motion: str,
                                  text_motion: bool, delay: float = 0.0, tag: str = "", work_dir: str = "") -> None:
@@ -363,7 +448,7 @@ class ShortsRendererService:
             logging.getLogger(__name__).warning(f"{e}")
         wav = out_base + ".wav"
         subprocess.run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                        "-t", f"{est_duration:.2f}", wav], check=True)
+                        "-t", f"{est_duration:.2f}", wav], check=True, **ffmpeg_tools.no_window())
         return wav, "silent"
 
     def _silent_scenes(self, scenes: List[ShortsScene], work_dir: str) -> List[str]:
@@ -372,7 +457,8 @@ class ShortsRendererService:
         for i, scene in enumerate(scenes):
             wav = os.path.join(work_dir, f"scene_{i:02d}.wav")
             subprocess.run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-                            "-t", f"{max(1.0, scene.duration_seconds):.2f}", wav], check=True)
+                            "-t", f"{max(1.0, scene.duration_seconds):.2f}", wav], check=True,
+                           **ffmpeg_tools.no_window())
             outs.append(wav)
         self.last_tts_engine = "테스트 전용 무음"
         self.last_warnings.append("테스트 전용: 음성 없이 만든 무음 영상입니다.")
@@ -444,7 +530,7 @@ class ShortsRendererService:
         proc = await asyncio.create_subprocess_exec(
             ffmpeg_tools.ffprobe(), "-v", "error", "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1", path,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **ffmpeg_tools.no_window(),
         )
         stdout, _ = await proc.communicate()
         try:
@@ -1179,7 +1265,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
     # 5. 최종 인코딩
     # ------------------------------------------------------------------
     async def _run(self, cmd: List[str], error_message: str) -> None:
-        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        proc = await asyncio.create_subprocess_exec(*cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                                    **ffmpeg_tools.no_window())
         _, stderr = await proc.communicate()
         if proc.returncode != 0:
             tail = stderr.decode(errors="ignore").strip().splitlines()[-3:]

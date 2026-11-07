@@ -169,6 +169,7 @@ def test_tri_shorts_photo_motion_moves_only_the_photo_zone(tmp_path):
     sb = _cards("empathy", 4)
     sb.assets = [MediaAsset(id="A1", kind="image", source="user", path=str(photo))]
     sb.card_slides[0].asset_id = "A1"            # 표지에 사진
+    sb.design_id = "tri-2-5-3@sage"
     scenes, _ = shorts_script.convert(sb, seconds=20)
     shorts_script.apply_to_storyboard(sb, scenes)
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
@@ -234,6 +235,7 @@ def test_tri_shorts_dynamic_motion_text_slide_and_transitions(tmp_path):
     """다이나믹 사진 움직임 + 글자 슬라이드 + 장면 전환: 글자는 등장이 끝나면 멈추고, 사진은 계속 움직이고, 길이는 음성과 맞는다."""
     from PIL import ImageChops
     sb, scenes = _photo_storyboard(tmp_path)
+    sb.design_id = "tri-2-5-3@sage"
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
     mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
         frame_style="tri", tts_call=_fake_tts, photo_motion="dynamic", text_motion="slide", transition="auto")))
@@ -289,3 +291,21 @@ def test_silent_test_voice_makes_video_without_tts_or_usage(tmp_path):
     assert abs(_duration(mp4) - sum(max(1.0, s.duration_seconds) for s in scenes) - 0.3 * (len(scenes) - 1)) < 1.0
     from flet_app.views.shorts_studio import voice_note
     assert "비용 없음" in voice_note("silent", {})
+
+
+def test_non_tri_design_shorts_keeps_the_card_design_centered_in_9x16(tmp_path):
+    """3단이 아닌 디자인(온자람)은 카드를 그 모양 그대로 9:16 화면 가운데 놓고, 움직임·전환을 적용해도 길이가 음성과 맞는다."""
+    sb, scenes = _photo_storyboard(tmp_path)
+    assert sb.design_id.startswith("onjaram")
+    renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
+    mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
+        frame_style="tri", tts_call=_fake_tts, photo_motion="dynamic", text_motion="slide", transition="auto")))
+    assert not renderer.last_warnings, renderer.last_warnings
+    a, b = _grab(mp4, 1.2, tmp_path / "a.png"), _grab(mp4, 1.9, tmp_path / "b.png")
+    assert a.size == (1080, 1920)
+    assert _changed(a, b, (0, 300, 1080, 1600)) > 100      # 화면 전체가 천천히 움직인다
+    assert abs(_duration(mp4) - _duration(str(tmp_path / "out" / "combined_narration.mp3"))) < 0.5
+    # 움직임 없이도 만들어진다
+    r2 = ShortsRendererService(export_dir=str(tmp_path / "out2"))
+    mp4b = asyncio.run(r2.render_shorts_video(sb, options=ShortsOptions(frame_style="tri", tts_call=_fake_tts)))
+    assert os.path.exists(mp4b) and not r2.last_warnings

@@ -52,6 +52,14 @@ def require() -> None:
         )
 
 
+def no_window() -> dict:
+    """Windows에서 ffmpeg를 띄울 때 검은 cmd 창이 깜빡이지 않게 하는 subprocess 인자(다른 OS에서는 빈 값)."""
+    if os.name == "nt":
+        import subprocess
+        return {"creationflags": subprocess.CREATE_NO_WINDOW}
+    return {}
+
+
 # --- H.264 인코더 선택 --------------------------------------------------------
 # libx264는 GPL 빌드에만 있다. LGPL 빌드(배포 라이선스 부담이 작음)에는 없으므로, 있는 인코더를 찾아 쓴다:
 # libx264 → libopenh264 → h264_mf(Windows Media Foundation, 별도 라이브러리 없이 동작) → 없으면 오류.
@@ -63,7 +71,8 @@ def _encoders() -> str:
     if key not in _encoder_cache:
         try:
             import subprocess
-            _encoder_cache[key] = subprocess.run([key, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20).stdout
+            _encoder_cache[key] = subprocess.run([key, "-hide_banner", "-encoders"], capture_output=True, text=True, timeout=20,
+                                                   **no_window()).stdout
         except Exception:  # noqa: BLE001
             _encoder_cache[key] = ""
     return _encoder_cache[key]

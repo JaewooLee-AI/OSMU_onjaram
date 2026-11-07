@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageOps
 from cards.schema import CardSlide, EditableStoryboard, MediaAsset, BrandElements
 from cards.fonts import korean_font, display_font, wrap_text_px, text_height, use_fonts, reset_fonts, use_text_scale, reset_text_scale, use_legible, reset_legible
 from cards import brand as bk
+from cards import ffmpeg_tools
 from cards import design_templates
 from cards import emphasis
 from cards.fonts import wrap_text_balanced
@@ -163,8 +164,8 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin):
             t = times[len(times) // 2]
             with tempfile.TemporaryDirectory() as tmp:
                 frame = os.path.join(tmp, "frame.png")
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-ss", str(t), "-i", asset.path, "-frames:v", "1", frame],
-                               check=True, capture_output=True)
+                subprocess.run([ffmpeg_tools.ffmpeg(), "-y", "-v", "error", "-ss", str(t), "-i", asset.path, "-frames:v", "1", frame],
+                               check=True, capture_output=True, **ffmpeg_tools.no_window())
                 with Image.open(frame) as im:
                     return im.convert("RGB")
         except Exception as e:
