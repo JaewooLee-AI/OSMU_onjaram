@@ -96,7 +96,7 @@ def test_plan_rule_based_without_llm():
     assert [s.slide_type for s in sb.card_slides] == ["cover", "numbered", "numbered", "numbered", "call_to_action"]
     cta = sb.card_slides[-1]
     assert "055-255-1365" in cta.body_content and "onjaram@naver.com" in cta.body_content  # 연락처는 킷 값
-    assert sb.card_format == "info_summary" and sb.design_id == "onjaram-warm"
+    assert sb.card_format == "info_summary" and sb.design_id == "editorial"
 
 
 def test_plan_llm_forces_structure_blacklist_and_fixed_cta(monkeypatch):

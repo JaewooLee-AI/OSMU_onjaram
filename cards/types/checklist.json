@@ -36,7 +36,7 @@
    "archetype": "call_to_action"
   }
  ],
- "layout_default": "onjaram-warm",
+ "layout_default": "editorial",
  "llm_structure": "1장 cover(질문형), checklist 카드(항목 3개씩, 1~2장), 해석 body 1장, 작은 실천 steps 1장, 마지막 call_to_action. 마지막 카드의 takeaway나 body에 '이 체크리스트는 진단이 아닙니다' 안내를 반드시 넣을 것. 특정 질환으로 단정하지 말 것",
  "fit_check": {
   "need_any": [

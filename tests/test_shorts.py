@@ -296,7 +296,7 @@ def test_silent_test_voice_makes_video_without_tts_or_usage(tmp_path):
 def test_non_tri_design_shorts_keeps_the_card_design_centered_in_9x16(tmp_path):
     """3단이 아닌 디자인(온자람)은 카드를 그 모양 그대로 9:16 화면 가운데 놓고, 움직임·전환을 적용해도 길이가 음성과 맞는다."""
     sb, scenes = _photo_storyboard(tmp_path)
-    assert sb.design_id.startswith("onjaram")
+    assert sb.design_id == "editorial"   # 기본 디자인(3단이 아님) → 카드 모양 그대로
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
     mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
         frame_style="tri", tts_call=_fake_tts, photo_motion="dynamic", text_motion="slide", transition="auto")))

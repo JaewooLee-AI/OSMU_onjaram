@@ -20,6 +20,6 @@
    "hint": "제목 + 핵심 한두 문장 + 마무리 한 줄"
   }
  ],
- "layout_default": "onjaram-warm",
+ "layout_default": "editorial",
  "llm_structure": "카드는 정확히 1장(single). lead_headline에 제목, body_content에 핵심 한두 문장, takeaway에 마무리 한 줄. 원문에 없는 사실·숫자는 만들지 말 것"
 }

@@ -116,7 +116,7 @@ def render_type_preview(pack: dict, design_id: Optional[str] = None, aspect: str
     """카드 종류의 장 구성을 기본 장수로 펼쳐 그린 [(원형 이름, PNG 경로)]."""
     slots = card_types.expand_sequence(pack, (pack.get("count") or {}).get("default"))
     slides = [(s["archetype"], s.get("hint", "")) for s in slots]
-    return _render(slides, design_id or pack.get("layout_default") or "tri-2-5-3", aspect)
+    return _render(slides, design_id or pack.get("layout_default") or "editorial", aspect)
 
 
 def render_design_preview(design_id: str) -> List[Tuple[str, str]]:

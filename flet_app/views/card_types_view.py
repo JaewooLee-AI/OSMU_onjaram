@@ -117,7 +117,7 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
         cmin = ft.TextField(label="최소 장수", value=str(c.get("min", 3)), width=110, dense=True)
         cdef = ft.TextField(label="기본 장수", value=str(c.get("default", 5)), width=110, dense=True)
         cmax = ft.TextField(label="최대 장수", value=str(c.get("max", 8)), width=110, dense=True)
-        layout = ft.Dropdown(label="기본 디자인", value=pack.get("layout_default") or "tri-2-5-3", dense=True, width=360,
+        layout = ft.Dropdown(label="기본 디자인", value=pack.get("layout_default") or "editorial", dense=True, width=360,
                              options=[ft.DropdownOption(key=d.id, text=d.name) for d in design_templates.list_all()])
         structure = ft.TextField(label="AI에게 줄 구성 지침", value=pack.get("llm_structure", ""), multiline=True,
                                  min_lines=3, max_lines=6, dense=True)
@@ -230,7 +230,7 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
 
         n_slides = len(pack["sequence"])
         pv_area, pv_toggle = make_preview(lambda design_id: preview.render_type_preview(pack, design_id),
-                                          with_design_picker=pack.get("layout_default") or "tri-2-5-3")
+                                          with_design_picker=pack.get("layout_default") or "editorial")
         return ft.Container(
             content=ft.Column([ft.Row([
                 ft.Column([

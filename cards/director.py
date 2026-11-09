@@ -100,6 +100,8 @@ def _rule_based(source: str, sequence: List[dict]) -> Dict[str, Any]:
             slides.append({"slide_type": "cover", "lead_headline": title, "body_content": "", "takeaway": ""})
         elif kind == "call_to_action":
             slides.append({"slide_type": "call_to_action", "lead_headline": "혼자 해결하기 어렵다면", "body_content": "", "takeaway": ""})
+        elif cursor >= len(sentences) and len(slides) > 1 and kind != "single":
+            continue   # 원고 문장을 다 썼으면 같은 문장을 되풀이하는 카드를 만들지 않는다(장수가 줄어듦)
         elif kind in ("steps", "checklist", "numbered"):
             chunk = sentences[cursor:cursor + 4] or sentences[-1:]
             cursor += len(chunk)

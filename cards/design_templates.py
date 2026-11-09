@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from cards.paths import DATA_DIR
 
 TEMPLATES_DIR = os.path.join(DATA_DIR, "design_templates")
-DEFAULT_ID = "classic"
+DEFAULT_ID = "editorial"
 
 NO_TEXT_RULE = ("ABSOLUTELY NO TEXT of any kind in the image: no letters, words, numbers, signs, labels, captions, banners, logos or watermarks. "
                 "Anything that normally carries writing (passports, tickets, maps, documents, screens, signboards) must be drawn blank or as abstract shapes only.")
@@ -24,7 +24,7 @@ class DesignTemplate(BaseModel):
     name: str
     description: str = ""
     builtin: bool = False
-    layout: str = Field(default="classic", description="classic | illustrated | color_block (꽉 찬 색 배경 + 줄 목록) | poster (포스터 표지 + 색 배경 목록) | typo (그림 없는 타이포그래피) | gov (공공 안내형)")
+    layout: str = Field(default="classic", description="classic | ed (에디토리얼) | illustrated | color_block (꽉 찬 색 배경 + 줄 목록) | poster (포스터 표지 + 색 배경 목록) | typo (그림 없는 타이포그래피) | gov (공공 안내형)")
     radius: int = Field(default=28, description="그림·박스 모서리 둥글기(px)")
     box_style: str = Field(default="filled", description="항목 박스: filled(색 채움) | outlined(윤곽선)")
     show_numbers: bool = Field(default=True, description="항목 박스에 번호 원 표시")
@@ -35,13 +35,16 @@ class DesignTemplate(BaseModel):
     body_font: str = Field(default="", description="본문 글꼴 ID (비우면 기본)")
     image_aspect: str = Field(default="4:5", description="AI 그림 화면비 (그림 영역 모양에 맞춤: 일러스트형은 가로로 넓은 16:9)")
     ratio: List[int] = Field(default_factory=lambda: [2, 5, 3], description="tri(3단) 레이아웃의 위:가운데:아래 높이 비율")
-    variant: str = Field(default="warm", description="oj(온자람 전용) 레이아웃의 변형: warm(공감·회복) | trust(전문·신뢰)")
+    variant: str = Field(default="warm", description="oj(온자람 전용) 레이아웃의 변형: warm(공감·회복) | trust(전문·신뢰). "
+                         "ed(에디토리얼): dark(어두운 배경) | photo(큰 사진) | 그 밖의 값은 기본")
     tri_theme: str = Field(default="light", description="tri 레이아웃 색: light(브랜드 밝은 배경) | dark(어두운 배경)")
 
     def uses_photo(self, slide_type: str) -> bool:
         """이 디자인에서 그 종류의 카드가 사진·그림을 쓰는지 (안 쓰는 카드는 AI 그림을 만들지 않아 비용을 아낌)"""
         if self.layout == "tri":   # 사진·영상 자리가 있는 모양: 인포그래픽 종류는 사진 없이 그린다
             return slide_type not in ("numbered", "steps", "checklist", "big_number", "comparison_table", "event_info")
+        if self.layout == "ed":   # 에디토리얼: 표지·본문류만 둥근 사진 칸, 목록·안내·숫자 카드는 칸 안에서 그린다
+            return slide_type in ("cover", "body", "single", "quote", "qa")
         if self.layout == "oj":   # 온자람 전용: 표지·본문류만 사진 칸이 있고 나머지는 카드 안에서 그린다
             return slide_type in ("cover", "body", "single", "quote", "qa")
         if self.layout in ("typo", "gov"):
@@ -65,6 +68,24 @@ BUILTINS: List[DesignTemplate] = [
     DesignTemplate(id="onjaram-trust", name="온자람 · 전문·신뢰 (네이비 + 크림, 번호 칸·인증 배지)", builtin=True, layout="oj", variant="trust", radius=14,
                    description="기업 EAP·학교·관공서 대상의 단정한 모양. 딥 네이비 주조색, 번호 칸과 각진 상자, 사회적기업 인증 배지를 보여 줍니다.",
                    colors={"primary": "#2C4A6F", "secondary": "#2C4A6F", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="editorial", name="온자람 에디토리얼 (Stitch 시안 · 머리줄·흰 칸 목록·요약 띠)", builtin=True, layout="ed", radius=32,
+                   image_aspect="16:9",
+                   description="Stitch 시안 1안을 옮긴 모양. 위에 시리즈 라벨과 쪽 번호, 코랄 머리말, 왼쪽 정렬 제목(강조어 코랄), "
+                               "둥근 사진 칸과 그 아래 본문, 흰 칸에 한 줄씩 담은 체크·단계 목록, 색 띠 안의 요약 한 줄. "
+                               "세이지·코랄·크림만 쓰고 연락처는 표지·마지막 카드에만 둡니다.",
+                   colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="editorial-dark", name="온자람 에디토리얼 · 어두운 배경", builtin=True, layout="ed", variant="dark", radius=32,
+                   image_aspect="16:9",
+                   description="에디토리얼 구성을 진초록 바탕에 흰 글자로. 사진·영상이 돋보이고 저녁·차분한 주제에 어울립니다.",
+                   colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5", "dark_bg": "#26372C"}),
+    DesignTemplate(id="editorial-serif", name="온자람 에디토리얼 · 세리프 제목 (고운바탕)", builtin=True, layout="ed", radius=32,
+                   image_aspect="16:9", heading_font="gowunbatang",
+                   description="에디토리얼 구성에 제목만 세리프(고운바탕). 칼럼·마음노트처럼 차분하게 읽히는 글에 어울립니다.",
+                   colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="editorial-photo", name="온자람 에디토리얼 · 큰 사진", builtin=True, layout="ed", variant="photo", radius=32,
+                   image_aspect="4:3",
+                   description="에디토리얼 구성에서 표지·본문 사진을 크게. 현장 후기처럼 사진이 주인공인 글에 어울립니다.",
+                   colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
     DesignTemplate(id="tri-2-5-3", name="3단 (위 제목 · 가운데 사진/인포그래픽 · 아래 소속) 2:5:3", builtin=True, layout="tri",
                    ratio=[2, 5, 3], radius=32,
                    description="위에 제목, 가운데에 사진·영상 또는 번호 단계 인포그래픽, 아래에 한 줄 요약과 소속·연락처. "
@@ -97,13 +118,25 @@ BUILTINS: List[DesignTemplate] = [
                                 "empty space, cheerful and approachable mood, editorial infographic style."),
 ]
 
+# 에디토리얼 계열이 기본. 그 밖의 내장 디자인은 '이전 디자인'으로 목록 뒤에 둔다(이미 그 디자인으로 만든 글이 있어 지우지 않음).
+LEGACY_PREFIX = "(이전) "
+for _t in BUILTINS:
+    if _t.layout != "ed":
+        _t.name = LEGACY_PREFIX + _t.name
+BUILTINS.sort(key=lambda t: t.layout != "ed")
+
+
+def is_legacy(t: DesignTemplate) -> bool:
+    return t.builtin and t.layout != "ed"
+
 
 def _path(template_id: str) -> str:
     return os.path.join(TEMPLATES_DIR, f"{template_id}.json")
 
 
 def list_all() -> List[DesignTemplate]:
-    out = list(BUILTINS)
+    """에디토리얼 계열 → 사용자가 만든 디자인 → 이전 디자인 순."""
+    out = [t for t in BUILTINS if not is_legacy(t)]
     if os.path.isdir(TEMPLATES_DIR):
         for name in sorted(os.listdir(TEMPLATES_DIR)):
             if name.endswith(".json"):
@@ -114,7 +147,7 @@ def list_all() -> List[DesignTemplate]:
                     out.append(t)
                 except Exception:
                     continue
-    return out
+    return out + [t for t in BUILTINS if is_legacy(t)]
 
 
 # 온자람 브랜드 컬러(core/brand_seed.BRAND_COLORS: 세이지 #4A7C59 · 네이비 #2C4A6F · 코랄 #E07A5F · 오트 #F0ECE1 · 크림 #FAF8F5)로

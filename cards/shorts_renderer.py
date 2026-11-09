@@ -144,6 +144,12 @@ class ShortsRendererService:
             if card_mode:
                 sb2 = storyboard
                 frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
+                if design.layout == "ed":
+                    # 에디토리얼은 비율을 따라 그릴 수 있으므로 쇼츠 화면(9:16)에 맞춰 처음부터 그린다(빈 띠 없음).
+                    # 위·아래는 유튜브·인스타 버튼에 가리는 영역이라 비워 둔다.
+                    frames.HEIGHT, frames.safe_top, frames.safe_bottom = self.HEIGHT, self.ED_SAFE_TOP, self.ED_SAFE_BOTTOM
+                    frames.FOLLOW_ASPECT = False
+                    frames.ED_SHORTS = True
             else:
                 sb2 = storyboard.model_copy(update={"design_id": tri_id})
                 frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
@@ -374,6 +380,9 @@ class ShortsRendererService:
                 while display_font(size, contact).getlength(contact) > W - 160 and size > 20:
                     size -= 2
                 d.text((W // 2, H - 44), contact, font=display_font(size, contact), fill=sub, anchor="mm")
+
+    ED_SAFE_TOP = 120      # 에디토리얼 9:16: 위쪽 UI(채널명·검색) 가림 영역
+    ED_SAFE_BOTTOM = 240   # 아래쪽 UI(설명·버튼) 가림 영역
 
     CARD_MOTIONS = {  # 카드 모양 쇼츠의 화면 전체 움직임: (시작 확대, 끝 확대, 시작 x, 끝 x, 시작 y, 끝 y)
         "zoom_in": (1.0, 1.06, 0.5, 0.5, 0.5, 0.5),

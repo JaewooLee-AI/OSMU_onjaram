@@ -21,6 +21,8 @@ from cards.fonts import display_font, korean_font, text_height, wrap_text_px
 
 _DARK_BG = "#23262B"
 STEP_TYPES = ("numbered", "steps")
+# '전화 055-…'처럼 콜론 없이 써도 라벨로 보는 낱말(안내·문의 카드)
+_AUTO_LABEL = r"^\s*(전화|이메일|메일|주소|홈페이지|예약|카카오톡|카톡|문의|위치|시간|운영)\s+(.+)$"
 CHECK_TYPES = ("checklist",)
 
 
@@ -69,8 +71,13 @@ class TriLayoutMixin:
         (t0, t1), (m0, m1), (b0, b1) = self._tri_zones(ctx.design.ratio)
         M = self.MARGIN
 
-        # --- 위: 제목 --------------------------------------------------------
+        # --- 위: 시리즈 라벨(작게) + 제목 -------------------------------------------
         text_w = W - 2 * M
+        kicker = (getattr(ctx.el, "series_label", "") or "").strip()
+        if kicker and (t1 - t0) >= 220:
+            kf = korean_font(32, "bold")
+            draw.text((W / 2, t0 + 22), kicker, font=kf, fill=c.accent if dark else c.secondary, anchor="ma")
+            t0 += 58
         box_h = t1 - t0
         # 제목은 줄 수뿐 아니라 영역 높이에 맞을 때까지 글자 크기를 줄인다(3줄 긴 제목이 가운데 영역을 침범하지 않게).
         size = int((78 if box_h >= 260 else 60) * ctx.title_scale)
@@ -99,7 +106,7 @@ class TriLayoutMixin:
                 self._tri_steps(img, draw, ctx, panel, dark, check=slide_type in CHECK_TYPES)
             elif slide_type == "big_number" and ctx.slide.stat_value:
                 self._tri_big_number(draw, ctx, panel, dark)
-            elif slide_type == "event_info":
+            elif slide_type in ("event_info", "call_to_action"):
                 self._tri_event(draw, ctx, panel, dark)
             elif slide_type == "comparison_table" and all(normalize_table(ctx.slide.comparison_table)):
                 header, rows = normalize_table(ctx.slide.comparison_table)
@@ -111,7 +118,9 @@ class TriLayoutMixin:
 
         # --- 아래: 요약 한 줄 + 소속·연락처 ---------------------------------------
         takeaway = (ctx.slide.takeaway or "").strip()
-        byline_h = 130   # 아래쪽 소속·연락처 줄이 차지하는 높이
+        # 소속·연락처는 표지와 마지막 카드에만(가운데 카드마다 같은 줄이 반복되면 정보 칸이 좁아진다). 가운데 카드는 쪽 번호만.
+        ends = ctx.index == 0 or ctx.index >= ctx.total - 1 or ctx.slide.slide_type in ("cover", "call_to_action", "single")
+        byline_h = 130 if ends else 64
         if takeaway:
             font, lines = self._fit_lines(takeaway, text_w, int(56 * ctx.takeaway_scale), 32, 2, "bold")
             lh = int(text_height(font) * 1.25)
@@ -121,6 +130,10 @@ class TriLayoutMixin:
                 draw.text((W / 2, y), line, font=font, fill=c.accent if dark else c.secondary, anchor="ma")
                 y += lh
         bottom = b1 - 26
+        if not ends:
+            page = f"{ctx.index + 1:02d} / {ctx.total:02d}"
+            draw.text((W / 2, bottom), page, font=korean_font(26, "semibold"), fill=sub, anchor="ms")
+            return img
         name = ctx.kit.brand_name if self._logo_visible(ctx) else ""
         sub_line = "  |  ".join(p for p in (ctx.kit.footer_text, f"상담 {ctx.kit.phone}" if ctx.el.show_phone and ctx.kit.phone else "") if p)
         if sub_line:
@@ -135,20 +148,50 @@ class TriLayoutMixin:
         """사진 위 캡션(왼쪽 아래)과 QR(오른쪽 아래)."""
         W = self.WIDTH
         draw = ImageDraw.Draw(img)
-        if caption:
-            cap = _items(ctx.slide.body_content, 1)
-            if cap:
-                font = korean_font(36, "bold")
-                tw = int(font.getlength(cap[0]))
-                x, y = 36, m1 - 34
-                shade = Image.new("RGBA", (tw + 36, 64), (0, 0, 0, 120))
-                img.paste(shade, (x - 18, y - 48), shade)
-                draw.text((x, y), cap[0], font=font, fill="#FFFFFF", anchor="ls")
         qr = make_qr(ctx.el)
+        if caption:
+            self._tri_photo_text(img, ctx, m0, m1, reserve_right=180 if qr is not None else 0)
         if qr is not None:
             size = 150
             qr = qr.resize((size, size))
             img.paste(qr, (W - size - 30, m1 - size - 24))
+
+    def _tri_photo_text(self, img: Image.Image, ctx, m0: int, m1: int, reserve_right: int = 0) -> None:
+        """사진 아래쪽에 본문 전체(최대 4줄)를 어두운 그라데이션 위 흰 글자로 얹는다. 예전에는 첫 줄만 띠로 보여 줘 내용이 버려졌다."""
+        lines_in = _items(ctx.slide.body_content, 4)
+        if not lines_in:
+            return
+        W = self.WIDTH
+        pad = 44
+        width = W - 2 * pad - reserve_right
+        max_h = int((m1 - m0) * 0.55)
+        size = int(40 * ctx.body_scale)
+        while True:
+            font = korean_font(size, "semibold")
+            lines: List[str] = []
+            for it in lines_in:
+                lines += wrap_text_px(it, font, width)
+            lh = int(text_height(font) * 1.38)
+            if lh * len(lines) + 2 * pad <= max_h or size <= 28:
+                break
+            size -= 2
+        block = lh * len(lines) + pad + 28
+        fade = 90                                 # 사진에서 글자 칸으로 부드럽게 넘어가는 높이
+        top = max(m0, m1 - block - fade)
+        grad_h = m1 - top
+        solid_from = grad_h - block               # 글자가 놓이는 곳부터는 충분히 어둡게(밝은 사진에서도 읽히게)
+        shade = Image.new("L", (1, grad_h))
+        for y in range(grad_h):
+            a = 205 if y >= solid_from else int(205 * (y / max(1, solid_from)) ** 1.5)
+            shade.putpixel((0, y), a)
+        shade = shade.resize((W, grad_h))
+        black = Image.new("RGB", (W, grad_h), (12, 16, 20))
+        img.paste(black, (0, top), shade)
+        draw = ImageDraw.Draw(img)
+        y = m1 - block
+        for line in lines:
+            draw.text((pad, y), line, font=font, fill="#FFFFFF")
+            y += lh
 
     def _tri_text_panel(self, draw, ctx, panel, dark: bool) -> None:
         x0, y0, x1, y1 = panel
@@ -189,7 +232,7 @@ class TriLayoutMixin:
         for line in (ctx.slide.body_content or "").replace("\\n", "\n").splitlines():
             if not line.strip():
                 continue
-            m = re.match(r"^\s*([^:：]{1,8})\s*[:：]\s*(.+)$", line)
+            m = re.match(r"^\s*([^:：]{1,8})\s*[:：]\s*(.+)$", line) or re.match(_AUTO_LABEL, line)
             rows.append((m.group(1).strip(), m.group(2).strip()) if m else ("", line.strip()))
         rows = rows[:6]
         if not rows:
@@ -203,7 +246,7 @@ class TriLayoutMixin:
         while True:
             font = korean_font(size, "semibold")
             lh = int(text_height(font) * 1.2)
-            wrapped = [wrap_text_px(v, font, x1 - pad - value_x) or [""] for _, v in rows]
+            wrapped = [wrap_text_px(v, font, x1 - pad - (value_x if l else x0 + pad)) or [""] for l, v in rows]
             if all(len(w) * lh <= row_h - 10 for w in wrapped) or size <= 26:
                 break
             size -= 2
@@ -216,7 +259,7 @@ class TriLayoutMixin:
                            "#FFFFFF", pad_x=20, height=ph, radius=ph // 2)
             ty = mid - len(lines) * lh // 2
             for line in lines:
-                draw.text((value_x, ty), line, font=font, fill=text_color)
+                draw.text((value_x if label else x0 + pad, ty), line, font=font, fill=text_color)
                 ty += lh
 
     def _tri_big_number(self, draw, ctx, panel, dark: bool) -> None:
@@ -242,7 +285,7 @@ class TriLayoutMixin:
         if not items:
             return
         # 글자를 크게 키울 때(body_scale)는 한 줄에 하나씩 세로로 늘어놓아야 큰 글자가 들어간다
-        cols = 1 if (len(items) <= 3 or (ctx.body_scale > 1.25 and len(items) <= 5)) else 2
+        cols = 1 if (len(items) <= 4 or (ctx.body_scale > 1.25 and len(items) <= 5)) else 2
         rows = -(-len(items) // cols)
         pad = 30
         cell_w = ((x1 - x0) - 2 * pad) // cols
