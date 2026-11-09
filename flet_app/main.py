@@ -104,6 +104,13 @@ def main(page: ft.Page) -> None:
         print(f"[main] {interrupted}개 콘텐츠가 이전 실행에서 생성 도중 중단되어 '실패'로 표시했습니다.")
     seeded = seed_if_empty()
     apply_seed_fixes()  # see core/brand_seed.SEED_FIXES
+    try:  # 공식 가격표에서 미리 받아 둔 '날짜가 정해진 단가 변경'을 그날이 되면 적용(네트워크 안 씀)
+        from core import google_catalog
+        changed = google_catalog.apply_due_prices()
+        if changed:
+            print(f"[main] 예정된 단가 변경 적용: {', '.join(changed)}")
+    except Exception as exc:  # noqa: BLE001 — 단가 갱신 실패가 앱 시작을 막지 않게
+        print(f"[main] 예정 단가 적용 실패: {exc}")
 
     saved_scale = (repo.get_app_state(FONT_SCALE_STATE_KEY) or {}).get("value")
     state = AppState(font_scale=float(saved_scale) if saved_scale else DEFAULT_FONT_SCALE)

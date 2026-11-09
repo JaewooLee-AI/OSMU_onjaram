@@ -168,7 +168,7 @@ class ShortsRendererService:
                 path = await frames.render_slide(sb2, idx)
                 dur = item["end"] - item["start"]
                 if card_mode:
-                    bg_path, card_path, cy, path = self._card_canvas(path, work_dir, f"{n:02d}")
+                    bg_path, card_path, cy, path = self._card_canvas(path, work_dir, f"{n:02d}", scene)
                 if animated:
                     slide = storyboard.card_slides[idx]
                     has_photo = (not card_mode) and bool(slide.asset_id and storyboard.asset(slide.asset_id)
@@ -282,7 +282,7 @@ class ShortsRendererService:
         base.save(bpath)
         return bpath, layers
 
-    def _card_canvas(self, card_path: str, work_dir: str, tag: str):
+    def _card_canvas(self, card_path: str, work_dir: str, tag: str, scene: Optional[ShortsScene] = None):
         """카드(폭 1080)를 9:16 화면 가운데에 놓는다. 가장자리가 한 색이면 그 색으로, 아니면 카드를 흐리게 키운 것으로 바탕을 채운다.
         반환: (바탕만 있는 PNG, 카드 PNG, 카드를 놓을 y, 바탕+카드를 합친 PNG)"""
         W, H = self.WIDTH, self.HEIGHT
@@ -307,6 +307,8 @@ class ShortsRendererService:
             bg = small.resize((W, H), Image.BILINEAR).filter(ImageFilter.GaussianBlur(24))
             bg = Image.blend(bg, Image.new("RGB", (W, H), (0, 0, 0)), 0.25)
         y = (H - card.height) // 2
+        if scene is not None:
+            self._fill_margins(bg, y, card.height, scene)
         bg_path = os.path.join(work_dir, f"cbg_{tag}.png")
         cp = os.path.join(work_dir, f"card_{tag}.png")
         full = os.path.join(work_dir, f"cfull_{tag}.png")
@@ -316,6 +318,62 @@ class ShortsRendererService:
         merged.paste(card, (0, y))
         merged.save(full)
         return bg_path, cp, y, full
+
+    def _fill_margins(self, bg: Image.Image, y: int, card_h: int, scene: ShortsScene) -> None:
+        """카드 위·아래 빈 띠에 내용을 채운다. 위: 브랜드 이름·한 줄 소개. 아래: 이 장면의 자막, 그 밑에 상담 연락처.
+        띠가 낮으면(<120px) 그 띠는 비워 둔다. 글자색은 바탕 밝기에 맞춘다."""
+        W, H = self.WIDTH, self.HEIGHT
+        kit = getattr(self, "kit", None)
+        el = getattr(self, "elements", None)
+        d = ImageDraw.Draw(bg)
+
+        def ink(box):
+            r, g, b = bg.crop(box).resize((1, 1), Image.BOX).getpixel((0, 0))
+            dark = (0.299 * r + 0.587 * g + 0.114 * b) < 140
+            return ("#FFFFFF", "#E2E8F0") if dark else ("#1F2937", "#4B5563")
+
+        top_h, bot_y = y, y + card_h
+        bot_h = H - bot_y
+        if top_h >= 120 and kit is not None and kit.brand_name:
+            main, sub = ink((0, 0, W, top_h))
+            name = kit.brand_name
+            f1 = display_font(46, name)
+            tag = kit.tagline or ""
+            f2 = korean_font(28, "semibold")
+            while tag and f2.getlength(tag) > W - 160 and len(tag) > 4:
+                tag = tag[:-2].rstrip() + "…"
+            cy0 = top_h // 2 - (20 if tag else 0)
+            d.text((W // 2, cy0), name, font=f1, fill=main, anchor="mm")
+            if tag:
+                d.text((W // 2, cy0 + 52), tag, font=f2, fill=sub, anchor="mm")
+        if bot_h >= 120:
+            main, sub = ink((0, bot_y, W, H))
+            parts = []
+            if kit is not None and (el is None or el.show_phone) and kit.phone:
+                parts.append(f"상담 {kit.phone}")
+            if kit is not None and (el is None or el.show_homepage) and kit.homepage:
+                parts.append(kit.homepage_short)
+            contact = "  |  ".join(parts)
+            room = bot_h - (64 if contact else 24)
+            cap = (scene.display_caption or "").strip()
+            lines, font = [], None
+            for size in (50, 44, 38, 32):
+                font = display_font(size, cap)
+                lines = wrap_text_px(cap, font, W - 160)
+                if len(lines) * (size + 14) <= room and len(lines) <= 3:
+                    break
+            lines = lines[:3]
+            if cap and lines:
+                lh = font.size + 14 if hasattr(font, "size") else 58
+                ty = bot_y + 20 + (room - lh * len(lines)) // 2 + lh // 2
+                for ln in lines:
+                    d.text((W // 2, ty), ln, font=font, fill=main, anchor="mm")
+                    ty += lh
+            if contact:
+                size = 30
+                while display_font(size, contact).getlength(contact) > W - 160 and size > 20:
+                    size -= 2
+                d.text((W // 2, H - 44), contact, font=display_font(size, contact), fill=sub, anchor="mm")
 
     CARD_MOTIONS = {  # 카드 모양 쇼츠의 화면 전체 움직임: (시작 확대, 끝 확대, 시작 x, 끝 x, 시작 y, 끝 y)
         "zoom_in": (1.0, 1.06, 0.5, 0.5, 0.5, 0.5),

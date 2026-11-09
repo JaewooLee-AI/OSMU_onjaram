@@ -14,8 +14,9 @@ from __future__ import annotations
 import flet as ft
 
 from ai_workers.multi_llm_router import VENDORS, normalize_model_name, test_connection
-from core import repo
-from core.crypto_utils import decrypt_api_key
+from core import google_catalog, repo
+from core.crypto_utils import decrypt_api_key, encrypt_api_key
+from flet_app.components.collapsible import collapsible
 
 from flet_app.theme import BRAND_COLORS, fs
 
@@ -30,6 +31,9 @@ _HINTS = {
     "text": "예: gemini-3.8-flash", "text_blog": "비우면 기본 글쓰기 모델", "vision": "비우면 기본 글쓰기 모델",
     "image": "예: gemini-3.1-flash-image", "tts": "예: gemini-3.8-flash-tts", "video": "예: gemini-omni-1.1-flash",
 }
+
+
+KEEP = "__keep__"   # 간편 설정에서 '지금 설정 유지'(Claude·GPT 등 고급 설정에서 지정한 모델)
 
 
 def _parse(text: str | None) -> float | None:
@@ -212,18 +216,195 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
             border=ft.Border.all(1, "#14000000"), border_radius=8, padding=12,
         )
 
+    # --- 간편 설정(Google) -----------------------------------------------------
+    # 키만 넣으면: 키로 쓸 수 있는 모델 조회 → 공식 가격표 읽기 → 기능별 추천 → [적용].
+    found: dict = {}
+
+    def current_summary() -> str:
+        slots = repo.get_slots()
+        parts = []
+        for slot in ("text", "image", "tts"):
+            m = repo.get_model(slots[slot]["model_ref"])
+            label = repo.MODEL_SLOTS[slot][0].split(" (")[0]
+            if not m:
+                parts.append(f"{label}: 지정 안 됨")
+                continue
+            priced = repo.get_model_price(m["vendor"], m["model_id"]) or m.get("per_image") is not None
+            parts.append(f"{label}: {m['display_name']}" + ("" if priced else " (단가 미등록)"))
+        return "지금 설정 — " + " · ".join(parts)
+
+    def simple_panel() -> ft.Control:
+        setting = repo.get_llm_setting("google")
+        has_key = bool(setting and setting.get("is_active"))
+        status = ft.Text("", size=fs(11, scale))
+        spinner = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
+        key_field = ft.TextField(label="Google API 키", password=True, can_reveal_password=True, width=420, dense=True,
+                                 hint_text="AI Studio에서 받은 키를 붙여 넣으세요", visible=not has_key)
+        change_key = ft.TextButton("키 바꾸기", visible=has_key)
+        result_box = ft.Column(spacing=8)
+        fetched = (repo.get_app_state(google_catalog.STATE_KEY) or {}).get("fetched")
+
+        def say(msg: str, ok: bool = True) -> None:
+            status.value = msg
+            status.color = "#1B6E3C" if ok else "#B3261E"
+            _refresh(status)
+
+        def busy(on: bool) -> None:
+            spinner.visible = on
+            fetch_btn.disabled = on
+            _refresh(spinner)
+            _refresh(fetch_btn)
+
+        def on_change_key(e: ft.Event) -> None:
+            key_field.visible, change_key.visible = True, False
+            _refresh(key_field)
+            _refresh(change_key)
+
+        def show_choices() -> None:
+            priced, available = found["priced"], found["available"]
+            rec = google_catalog.recommend(priced, available)
+            slots = repo.get_slots()
+            rows, dropdowns = [], {}
+            for slot in google_catalog.RULES:
+                options = google_catalog.candidates(slot, priced, available)
+                current = repo.get_model(slots[slot]["model_ref"])
+                # 이미 쓰고 있는 Google 모델이 고를 수 있는 목록에 있으면 그대로 둔다(사용자가 고른 것을 추천으로 덮어쓰지 않음).
+                keep = current["model_id"] if (current and current["vendor"] == "google" and current["model_id"] in options) else None
+                other = current if (current and current["vendor"] != "google") else None   # Claude·GPT 등 직접 지정한 모델
+                chosen = (KEEP if other else None) or keep or rec[slot]
+                info = ft.Text("고급 설정에 등록한 모델과 단가를 그대로 씁니다." if chosen == KEEP else
+                               google_catalog.price_line(priced.get(chosen)) if chosen else "고를 수 있는 모델이 없습니다",
+                               size=fs(10, scale), color=BRAND_COLORS["text_muted"])
+                dd = ft.Dropdown(label=repo.MODEL_SLOTS[slot][0], width=600, dense=True, value=chosen,
+                                 options=[ft.DropdownOption(key=m, text=f"{priced[m]['name']}  ({m})"
+                                                            + ("  ← 추천" if m == rec[slot] else "") + ("  (지금 사용 중)" if m == keep else "")) for m in options]
+                                 + ([ft.DropdownOption(key=KEEP, text=f"지금 설정 유지: {other['display_name']} ({other['vendor']})")] if other else []))
+
+                def on_pick(e, info=info, dd=dd) -> None:
+                    info.value = ("고급 설정에 등록한 모델과 단가를 그대로 씁니다." if dd.value == KEEP
+                                  else google_catalog.price_line(priced.get(dd.value)))
+                    _refresh(info)
+
+                dd.on_select = on_pick
+                dropdowns[slot] = dd
+                now = (f"지금: {current['display_name']} — 그대로 둡니다(바꾸려면 목록에서 고르세요)" if keep else
+                       f"지금: {current['display_name']}" if current else "지금: 지정 안 됨")
+                rows.append(ft.Column([dd, ft.Text(now, size=fs(10, scale), color=BRAND_COLORS["text_muted"]), info], spacing=2))
+
+            def on_apply(e: ft.Event) -> None:
+                try:
+                    done = google_catalog.apply({k: (None if d.value == KEEP else d.value) for k, d in dropdowns.items()}, priced)
+                except ValueError as exc:
+                    say(f"❌ {exc}", ok=False)
+                    return
+                found.clear()
+                rebuild()
+                page.show_dialog(ft.SnackBar(ft.Text("✅ 적용했습니다 — " + " / ".join(done))))
+
+            result_box.controls = [
+                ft.Text("추천 구성 (바꾸려면 목록에서 고르세요)", weight=ft.FontWeight.BOLD, size=fs(12, scale)),
+                *rows,
+                ft.Text("블로그 글·사진 분석은 비워 두면 기본 글쓰기 모델을 씁니다. 금액은 공식 가격표 기준 예상치이며, "
+                        "무료 등급·할인은 반영하지 않습니다. 날짜가 정해진 가격 변경은 그날부터 자동으로 적용됩니다.",
+                        size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+                ft.Row([ft.FilledButton("적용", icon=ft.Icons.CHECK, on_click=on_apply)]),
+            ]
+            _refresh(result_box)
+
+        def on_fetch(e: ft.Event) -> None:
+            typed = (key_field.value or "").strip() if key_field.visible else ""
+            if not typed and not has_key:
+                say("Google API 키를 먼저 붙여 넣으세요.", ok=False)
+                return
+            busy(True)
+            say("⏳ 키 확인 → 모델 목록 → 공식 가격표를 불러오는 중…")
+
+            def _work() -> None:
+                try:
+                    api_key = typed or decrypt_api_key(setting["encrypted_api_key"])
+                    try:
+                        available = google_catalog.list_available(api_key)
+                    except Exception as exc:  # noqa: BLE001
+                        say(f"❌ 키 확인 실패 — 키가 맞는지 확인하세요. ({str(exc)[:120]})", ok=False)
+                        return
+                    if typed:
+                        repo.upsert_llm_setting("google", (setting or {}).get("model_name") or "", encrypt_api_key(typed))
+                    try:
+                        priced = google_catalog.parse_pricing(google_catalog.fetch_pricing_text())
+                    except Exception as exc:  # noqa: BLE001
+                        say(f"⚠️ 키는 정상입니다. 공식 가격표를 불러오지 못했습니다({str(exc)[:80]}). 인터넷 연결을 확인하고 잠시 뒤 "
+                            "다시 시도하세요. 계속 안 되면 '⚙️ 고급 설정'에서 직접 입력하시거나 관리자에게 문의하세요.", ok=False)
+                        return
+                    problems = google_catalog.format_problems(priced, available)
+                    if not priced:
+                        say(google_catalog.FORMAT_MESSAGE, ok=False)
+                        return
+                    found.update(priced=priced, available=available)
+                    if problems:   # 일부만 읽힘: 고를 수는 있게 두되, 단가가 빠질 수 있음을 알린다
+                        say(google_catalog.FORMAT_MESSAGE + "\n(" + " ".join(problems) + " 키는 정상입니다.)", ok=False)
+                    else:
+                        say(f"✅ 키 정상 · 쓸 수 있는 모델 {len(available)}개 · 가격표 모델 {len(priced)}개를 읽었습니다.")
+                    show_choices()
+                finally:
+                    busy(False)
+
+            page.run_thread(_work)
+
+        def on_refresh_prices(e: ft.Event) -> None:
+            busy(True)
+            say("⏳ 공식 가격표를 다시 불러오는 중…")
+
+            def _work() -> None:
+                try:
+                    priced = google_catalog.parse_pricing(google_catalog.fetch_pricing_text())
+                    if google_catalog.format_problems(priced):   # 형식이 바뀌었으면 지금 단가를 덮어쓰지 않는다
+                        say(google_catalog.FORMAT_MESSAGE + " (지금 저장된 단가는 그대로 둡니다.)", ok=False)
+                        return
+                    n = google_catalog.refresh_registered(priced)
+                    say(f"✅ 등록된 Google 모델 {n}개의 단가를 갱신했습니다." if n else "갱신할 Google 모델이 없습니다.", ok=bool(n))
+                except Exception as exc:  # noqa: BLE001
+                    say(f"❌ 가격표를 불러오지 못했습니다: {str(exc)[:120]}", ok=False)
+                finally:
+                    busy(False)
+
+            page.run_thread(_work)
+
+        fetch_btn = ft.FilledButton("키 확인하고 모델·가격 불러오기", icon=ft.Icons.CLOUD_DOWNLOAD, on_click=on_fetch)
+        change_key.on_click = on_change_key
+        if found:
+            show_choices()
+        return ft.Container(
+            content=ft.Column([
+                ft.Text("🚀 간편 설정 (Google 키 하나로)", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+                ft.Text("Google API 키만 넣으면 쓸 수 있는 모델과 공식 가격을 불러와 기능마다 추천합니다. [적용]을 누르면 끝입니다.",
+                        size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+                ft.Row([ft.Text("✅ Google API 키 등록됨" if has_key else "🔑 Google API 키가 없습니다", size=fs(12, scale)),
+                        change_key], spacing=8),
+                key_field,
+                ft.Row([fetch_btn, ft.OutlinedButton("단가만 다시 불러오기", icon=ft.Icons.REFRESH, on_click=on_refresh_prices),
+                        spinner], spacing=8, wrap=True),
+                ft.Text(current_summary(), size=fs(11, scale)),
+                ft.Text(f"마지막으로 가격표를 불러온 날: {fetched}" if fetched else "아직 가격표를 불러온 적이 없습니다.",
+                        size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+                status,
+                result_box,
+            ], spacing=8),
+            border=ft.Border.all(1, "#14000000"), border_radius=8, padding=12, bgcolor="#F6F9F4",
+        )
+
     def _body() -> ft.Control:
         slots = repo.get_slots()
         cards = [slot_card(slot, label, need, repo.get_model(slots[slot]["model_ref"]))
                  for slot, (label, need) in repo.MODEL_SLOTS.items()]
-        return ft.Column([
-            ft.Text("기능별 사용 모델", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
-            ft.Text("벤더를 고르고 모델 이름을 그대로 입력하세요. 모델이 단종되거나 새로 나오면 이름만 고쳐 저장하면 됩니다. "
-                    "단가는 공식 가격표를 보고 직접 입력하며, 비워 두면 '단가 미등록'입니다(0원 아님). "
-                    "이 화면의 이름은 예시일 뿐이라 [연결 테스트]로 지금 쓸 수 있는지 확인하세요. "
-                    "API 키는 🔑 LLM 벤더 탭에서 벤더마다 한 번만 등록합니다.",
+        advanced = ft.Column([
+            ft.Text("기능마다 벤더·모델 이름·단가를 직접 입력합니다. Anthropic·OpenAI 모델을 쓰거나, 자동으로 읽은 단가를 고칠 때만 쓰세요. "
+                    "단가를 비워 두면 '단가 미등록'입니다(0원 아님).",
                     size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
             *cards,
+        ], spacing=10)
+        return ft.Column([
+            simple_panel(),
+            *collapsible("⚙️ 고급 설정 (직접 입력 · 다른 벤더) ▸", advanced),
         ], spacing=10, scroll=ft.ScrollMode.AUTO)
 
     box.content = _body()

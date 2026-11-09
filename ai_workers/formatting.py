@@ -760,6 +760,32 @@ def naver_full_html(content: str, fmt: Optional[dict], mode: str = DEFAULT_NAVER
     return "".join(parts)
 
 
+def _located_hints(content: str, items: list) -> Tuple[List[str], List[Tuple[int, dict]]]:
+    """'사진 자리' 서식을 본문 줄 위치에 맞춰 문서 순서로 돌려줍니다. (본문 줄, [(그 자리 뒤 줄 번호, 서식 항목)]).
+    앞 문단이 없는 자리는 글 맨 앞(-1), 문단을 못 찾은 자리는 뺍니다."""
+    hints = [i for i in items if i.get("type") == "photo_hint"]
+    lines = (content or "").split("\n")
+    text_lines = [n for n, line in enumerate(lines) if line.strip() and not IMAGE_TAG_RE.fullmatch(line.strip())]
+    texts = [lines[n].strip() for n in text_lines]
+    located = []
+    for hint in hints:
+        after = hint.get("after") or ""
+        if not after:
+            located.append((-1, hint))
+            continue
+        idx = _find_para(after, texts)
+        if idx is not None:
+            located.append((text_lines[idx], hint))
+    located.sort(key=lambda x: x[0])
+    return lines, located
+
+
+def open_photo_hints(content: str, fmt: Optional[dict]) -> List[dict]:
+    """아직 사진이 안 들어간 '사진 자리'(문서 순서). 각 항목의 `caption`이 어떤 사진인지 설명입니다."""
+    _lines, located = _located_hints(content, list((fmt or {}).get("items") or []))
+    return [hint for _n, hint in located]
+
+
 def fill_photo_hints(content: str, fmt: Optional[dict], attached: List[str]) -> Tuple[str, dict, int]:
     """초안을 만든 뒤 첨부한 사진을 '사진 자리' 표시가 있던 곳에 차례로 넣습니다 (AI 호출 없음).
 
@@ -771,25 +797,11 @@ def fill_photo_hints(content: str, fmt: Optional[dict], attached: List[str]) -> 
     items = list(fmt.get("items") or [])
     tagged = set(IMAGE_TAG_RE.findall(content or ""))
     pending_photos = [p for p in (attached or []) if p not in tagged]
-    hints = [i for i in items if i.get("type") == "photo_hint"]
-    if not pending_photos or not hints:
+    if not pending_photos or not any(i.get("type") == "photo_hint" for i in items):
         return content, fmt, 0
 
-    lines = (content or "").split("\n")
-    text_lines = [n for n, line in enumerate(lines) if line.strip() and not IMAGE_TAG_RE.fullmatch(line.strip())]
-    texts = [lines[n].strip() for n in text_lines]
-
     # 문서 순서대로 자리를 고릅니다(앞 문단이 없는 자리 = 글 맨 앞). 못 찾은 자리는 건너뜁니다.
-    located = []
-    for hint in hints:
-        after = hint.get("after") or ""
-        if not after:
-            located.append((-1, hint))
-            continue
-        idx = _find_para(after, texts)
-        if idx is not None:
-            located.append((text_lines[idx], hint))
-    located.sort(key=lambda x: x[0])
+    lines, located = _located_hints(content, items)
     pairs = list(zip(located, pending_photos))
 
     # 뒤에서부터 넣어야 앞 줄 번호가 밀리지 않습니다.

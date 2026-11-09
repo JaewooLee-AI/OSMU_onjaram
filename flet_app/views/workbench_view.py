@@ -18,7 +18,7 @@ import time
 
 import flet as ft
 
-from ai_workers import content_mode, factsheet, formatting, post_types, vision
+from ai_workers import blog_images, content_mode, factsheet, formatting, post_types, vision
 from ai_workers.content_writer import (
     LENGTH_MODES,
     apply_format,
@@ -564,6 +564,80 @@ def _build_campaign_editor(
         photo_row,
         upload_status,
         cost_box,
+    ]
+
+    # --- AI 이미지로 사진 자리 채우기(선택) --------------------------------------
+    # 사진을 올리지 않으면 본문에 '사진 자리'(어떤 사진을 넣으면 좋은지) 표시가 남는다. 그건 그대로 두고,
+    # 사용자가 원할 때만 그 설명으로 AI 이미지를 만들어 넣는다(비용 확인 창을 거침).
+    has_body = bool((campaign.get("content") or "").strip())
+    ai_est = blog_images.plan(campaign) if has_body else None
+    ai_status = ft.Text("", size=fs(11, scale))
+    ai_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
+    ai_button = ft.OutlinedButton(
+        "🎨 사진 자리를 AI 이미지로 채우기", icon=ft.Icons.AUTO_AWESOME,
+        disabled=not (ai_est and ai_est["count"] and ai_est["model"] is not None),
+    )
+
+    def _run_ai_images() -> None:
+        ai_button.disabled = True
+        ai_button.update()
+        ai_spinner.visible = True
+        ai_spinner.update()
+        ai_status.value = "⏳ AI 이미지를 만드는 중입니다… (장당 10~30초)"
+        ai_status.color = BRAND_COLORS["text_muted"]
+        ai_status.update()
+
+        def _work() -> None:
+            try:
+                res = blog_images.generate(campaign_id)
+            except Exception as exc:  # noqa: BLE001
+                ai_status.value = f"❌ 실패: {exc}"
+                ai_status.color = "#B3261E"
+                ai_spinner.visible = False
+                ai_button.disabled = False
+                ai_spinner.update()
+                ai_button.update()
+                ai_status.update()
+                return
+            msg = f"✅ AI 이미지 {res['made']}장을 사진 자리에 넣었습니다."
+            if res["failed"]:
+                msg += f" (실패: {res['failed'][0][1]} — 만든 장까지만 넣었고 남은 자리 표시는 그대로입니다)"
+            if res["made"]:
+                msg += " 네이버에 게시할 때 'AI 활용 콘텐츠' 표시가 필요한지 확인하세요."
+            ai_status.value = msg
+            ai_status.color = "#1B6E3C" if res["made"] else "#B3261E"
+            ai_spinner.visible = False
+            ai_spinner.update()
+            ai_status.update()
+            if res["made"]:
+                time.sleep(0.8)
+                reload()
+            else:
+                ai_button.disabled = False
+                ai_button.update()
+
+        page.run_thread(_work)
+
+    def on_ai_images(e: ft.Event) -> None:
+        est = blog_images.plan(repo.get_campaign(campaign_id) or {})
+
+        def go(_e: ft.Event) -> None:
+            page.pop_dialog()
+            _run_ai_images()
+
+        page.show_dialog(ft.AlertDialog(
+            modal=True, title=ft.Text("AI 이미지를 만들까요?"),
+            content=ft.Text(blog_images.describe(est) + "\n실행하면 사용 기록에 남고 비용이 발생할 수 있습니다. "
+                            "사람 얼굴·글자는 그리지 않는 그림이며, 실제 현장 사진이 아닙니다."),
+            actions=[ft.TextButton("취소", on_click=lambda _e: page.pop_dialog()), ft.FilledButton("만들기", on_click=go)],
+        ))
+
+    ai_button.on_click = on_ai_images
+    controls += [
+        ft.Row([ai_button, ai_spinner]),
+        ft.Text(blog_images.describe(ai_est) if ai_est else "글을 만들고 나면, 사진 자리에 AI 이미지를 넣을 수 있습니다(선택 · 비용 발생).",
+                size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+        ai_status,
     ]
 
     # --- 저장 / 생성 ------------------------------------------------------------
