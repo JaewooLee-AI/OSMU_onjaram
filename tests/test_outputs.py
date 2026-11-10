@@ -157,7 +157,7 @@ def test_card_style_changes_the_rendered_picture(campaign):
         import shutil
         shutil.rmtree(os.path.join(os.path.dirname(__file__), "_style_tmp"), ignore_errors=True)
     assert ImageChops.difference(base, styled).getbbox() is not None
-    assert styled.getpixel((5, 5)) == (0x1B, 0x3A, 0x5C)               # 배경이 실제로 바뀌었다
+    assert styled.getpixel((5, styled.height // 2)) == (0x1B, 0x3A, 0x5C)   # 배경이 실제로 바뀌었다(위 띠가 있는 디자인도 있어 가운데에서)
 
 
 def test_text_scale_also_works_on_non_3tier_designs_without_touching_small_labels(campaign):

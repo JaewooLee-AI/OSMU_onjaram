@@ -63,7 +63,7 @@ def describe_voice_estimate(est: dict) -> str:
     if est["model"] is None:
         return f"{head} · '음성 내레이션' 모델이 없어 무료 음성(gTTS)으로 만듭니다(품질 낮음)."
     if est["usd"] is None:
-        return f"{head} · 음성 모델 {est['model']['display_name']} · 단가 미등록(모델 등록에서 음성 모델의 입력·출력 단가를 입력하면 예상 금액이 보입니다)"
+        return f"{head} · 음성 모델 {est['model']['display_name']} · 단가 미등록(⚙️ 설정 → 🤖 AI 연결·모델에서 음성 모델의 입력·출력 단가를 입력하면 예상 금액이 보입니다)"
     return f"{head} · 음성 모델 {est['model']['display_name']} · 예상 약 ${est['usd']:.3f} ({est.get('basis') or '등록 단가'})"
 
 
@@ -107,6 +107,7 @@ def render_video(campaign_id: str, sb, voice: str, frame_style: str, progress=No
 
 
 def build_shorts_tab(page: ft.Page, campaign: dict, scale: float, reload=None) -> ft.Control:
+    """(앱 화면에서는 쓰지 않음 — 🃏 카드·쇼츠 스튜디오가 대신함) 예전 쇼츠 탭. 시험이 대본·비용·렌더 로직을 이 화면으로 확인하고 있어 남겨 둠."""
     campaign_id = campaign["id"]
     sb = load_storyboard(campaign)
     if sb is None:

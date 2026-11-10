@@ -5,8 +5,8 @@
   카드 종류·디자인·이미지 모드는 이미 기획한 카드가 있으면 그 설정을, 없으면 기본값을 씁니다.
   `one_card`(한 장 카드) 모드면 카드 종류를 '한 장 카드'로 고정합니다.
 - 쇼츠: 카드에서 대본을 만듭니다. 카드뉴스를 고르지 않고 쇼츠만 골랐으면 카드는 기획만 하고(이미지는 내보내지
-  않고) 대본에 씁니다. **영상 렌더(음성 합성 비용 발생)는 여기서 하지 않고** 🎬 쇼츠 영상 탭의 확인 창을 거칩니다.
-- AI 이미지 생성도 비용이 들어서 여기서 하지 않습니다(🃏 카드뉴스 탭에서 예상 비용을 보고 만듭니다).
+  않고) 대본에 씁니다. **영상 렌더(음성 합성 비용 발생)는 여기서 하지 않고** 🃏 카드·쇼츠 화면의 확인 창을 거칩니다.
+- AI 이미지 생성도 비용이 들어서 여기서 하지 않습니다(🃏 카드·쇼츠 화면에서 예상 비용을 보고 만듭니다).
 
 화면 코드와 분리해 둬서 시험할 수 있습니다.
 """
@@ -34,6 +34,20 @@ def default_outputs() -> List[str]:
     if not isinstance(stored, list):
         return list(OUTPUT_KEYS)
     return [k for k in OUTPUT_KEYS if k in stored]
+
+
+SHORTS_SECONDS_KEY = "default_shorts_seconds"
+SHORTS_SECONDS = (20, 30, 45, 60)
+
+
+def default_shorts_seconds() -> int:
+    """쇼츠 대본의 기본 목표 길이(설정 → 생성 채널). 워크벤치 [만들기]와 카드·쇼츠 화면이 같이 쓴다."""
+    v = (repo.get_app_state(SHORTS_SECONDS_KEY) or {}).get("value")
+    return int(v) if v in SHORTS_SECONDS else 45
+
+
+def save_default_shorts_seconds(seconds: int) -> None:
+    repo.set_app_state(SHORTS_SECONDS_KEY, {"value": int(seconds) if int(seconds) in SHORTS_SECONDS else 45})
 
 
 def save_default_outputs(keys: List[str]) -> None:
@@ -101,7 +115,6 @@ def run_outputs(campaign_id: str, outputs: List[str], one_card: bool = False, us
                 progress: Progress = None) -> Dict[str, object]:
     """고른 산출물을 차례로 만듭니다. 반환: 만든 것·건너뛴 것을 담은 요약(화면 문구용)."""
     # 화면 모듈의 저장·그리기 함수를 쓴다(같은 파일 형식을 한곳에서 관리하려고).
-    from flet_app.views.card_studio import render_storyboard, save_storyboard
 
     chosen = [k for k in OUTPUT_KEYS if k in outputs]
     if not chosen:
@@ -114,24 +127,48 @@ def run_outputs(campaign_id: str, outputs: List[str], one_card: bool = False, us
         result["made"].append("블로그")
 
     if "cards" in chosen or "shorts" in chosen:
-        _say(progress, "카드를 기획하는 중…")
-        sb, report = plan_for_campaign(campaign_id, one_card=one_card, use_ai=use_ai)
-        campaign = repo.get_campaign(campaign_id) or {}
-        result["notes"] += list(report.get("warnings") or [])
-        if "cards" in chosen:
-            _say(progress, "카드를 그리는 중…")
-            paths = render_storyboard(campaign_id, sb)
-            result["made"].append(f"카드뉴스 {len(paths)}장")
+        if "blog" in chosen:
+            _make_cards(campaign_id, chosen, one_card, use_ai, progress, result)
         else:
-            result["notes"].append("쇼츠용으로 카드를 기획만 했습니다(카드 이미지는 만들지 않았습니다).")
-
-        if "shorts" in chosen:
-            _say(progress, "쇼츠 대본을 만드는 중…")
-            with repo.usage_scope(campaign_id):
-                scenes, srep = shorts_script.convert(sb, campaign.get("brand_kit_id"), 45, use_llm=bool(use_ai))
-            shorts_script.apply_to_storyboard(sb, scenes)
-            save_storyboard(campaign_id, sb)
-            result["notes"] += list(srep.get("warnings") or [])
-            result["made"].append(f"쇼츠 대본 {len(scenes)}장면")
-            result["notes"].append("쇼츠 영상은 🃏 카드·쇼츠 화면에서 [쇼츠 영상 만들기]를 눌러 만듭니다(음성 비용 확인 창이 뜹니다).")
+            # 블로그 없이 카드·쇼츠만 만들 때도 상태를 남긴다: 만드는 동안 '생성 중', 끝나면 '초안 완료'(예전엔 계속 '소재 대기').
+            prev = (repo.get_campaign(campaign_id) or {}).get("status") or "awaiting_media"
+            if prev == "processing":
+                raise ValueError("이 글은 지금 만드는 중입니다. 끝난 뒤 다시 시도하세요.")
+            keep = prev in ("draft", "ready_to_publish", "published")   # 이미 진행된 글은 상태를 되돌리지 않는다
+            if not keep:
+                repo.update_campaign(campaign_id, status="processing")
+            try:
+                _make_cards(campaign_id, chosen, one_card, use_ai, progress, result)
+            except Exception as exc:
+                if not keep:
+                    repo.update_campaign(campaign_id, status="failed", publish_error=f"카드·쇼츠 만들기 실패: {exc}")
+                raise
+            if not keep:
+                repo.update_campaign(campaign_id, status="draft", publish_error=None)
     return result
+
+
+def _make_cards(campaign_id: str, chosen: List[str], one_card: bool, use_ai: Optional[bool], progress: Progress,
+                result: Dict[str, object]) -> None:
+    from flet_app.views.card_studio import render_storyboard, save_storyboard
+
+    _say(progress, "카드를 기획하는 중…")
+    sb, report = plan_for_campaign(campaign_id, one_card=one_card, use_ai=use_ai)
+    campaign = repo.get_campaign(campaign_id) or {}
+    result["notes"] += list(report.get("warnings") or [])
+    if "cards" in chosen:
+        _say(progress, "카드를 그리는 중…")
+        paths = render_storyboard(campaign_id, sb)
+        result["made"].append(f"카드뉴스 {len(paths)}장")
+    else:
+        result["notes"].append("쇼츠용으로 카드를 기획만 했습니다(카드 이미지는 만들지 않았습니다).")
+
+    if "shorts" in chosen:
+        _say(progress, "쇼츠 대본을 만드는 중…")
+        with repo.usage_scope(campaign_id):
+            scenes, srep = shorts_script.convert(sb, campaign.get("brand_kit_id"), default_shorts_seconds(), use_llm=bool(use_ai))
+        shorts_script.apply_to_storyboard(sb, scenes)
+        save_storyboard(campaign_id, sb)
+        result["notes"] += list(srep.get("warnings") or [])
+        result["made"].append(f"쇼츠 대본 {len(scenes)}장면")
+        result["notes"].append("쇼츠 영상은 🃏 카드·쇼츠 화면에서 [쇼츠 영상 만들기]를 눌러 만듭니다(음성 비용 확인 창이 뜹니다).")

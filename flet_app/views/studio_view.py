@@ -123,7 +123,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     type_dd = ft.Dropdown(label="카드 종류", width=300, dense=True, value=first_multi,
                           options=[ft.DropdownOption(key=p["id"], text=p["name"]) for p in types if p["id"] != outputs.ONE_CARD_TYPE])
     design_dd = ft.Dropdown(label="디자인", width=300, dense=True,
-                            options=[ft.DropdownOption(key=d.id, text=d.name) for d in design_templates.list_all()])
+                            options=[ft.DropdownOption(key=d.id, text=d.name) for d in design_templates.choices()])
     count_dd = ft.Dropdown(label="카드 장수", width=170, dense=True)
     aspect_dd = ft.Dropdown(label="카드 크기", width=300, dense=True, value="4:5",
                             options=[ft.DropdownOption(key=k, text=v) for k, v in CARD_ASPECT_LABELS.items()])
@@ -150,8 +150,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     photo_note = ft.Text("", size=fs(11, scale), color=BRAND_COLORS["text_muted"])
     note = ft.Text("", size=fs(11, scale), color=BRAND_COLORS["text_muted"])
 
-    def is_tri() -> bool:
-        return design_templates.get(design_dd.value or "tri-2-5-3").layout == "tri"
+    def follows_aspect() -> bool:
+        return design_templates.get(design_dd.value or design_templates.DEFAULT_ID).layout in ("tri", "ed", "rp")
 
     def refresh_photo_note() -> None:
         """사진을 올렸는데 카드에 안 들어가는 이유(디자인·종류별 사진 칸 수)를 미리 알려 준다."""
@@ -162,20 +162,20 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             pack = packs.get(outputs.ONE_CARD_TYPE if count_dd.value == "1" else type_dd.value) or {}
             n = int(count_dd.value or 0) or None
             seq = (card_types.free_sequence(pack, n) if (pack and n) else card_types.expand_sequence(pack, None)) if pack else []
-            design = design_templates.get(design_templates.with_palette(design_dd.value, palette_dd.value) or "tri-2-5-3")
+            design = design_templates.get(design_templates.with_palette(design_dd.value, palette_dd.value) or design_templates.DEFAULT_ID)
             slots = sum(1 for s in seq if s["archetype"] in images.PHOTO_TYPES and design.uses_photo(s["archetype"]))
             cp = S.get("campaign") or {}
             photo_note.value = (f"쓸 수 있는 사진 {have}장(블로그 {len(cp.get('storage_file_paths') or [])} + 카드 전용 {len(cp.get('card_photo_paths') or [])}) "
                                 f"· 이 설정에서 사진이 들어가는 카드 {slots}장")
             if have > slots:
-                photo_note.value += " — 나머지 사진은 ② 다듬기에서 카드마다 고르거나, 사진 칸이 많은 '3단' 디자인을 쓰세요"
+                photo_note.value += " — 나머지 사진은 ② 다듬기에서 카드마다 고르거나, 카드 장수를 늘려 보세요"
         extras = blog_only_extras(S.get("campaign") or {})
         extras_box.visible = bool(extras)
         extras_text.value = (f"⚠️ 블로그 사진 목록에 본문에 쓰이지 않은 사진이 {len(extras)}장 있습니다. 네이버 게시 때 글 맨 뒤에 붙을 수 있어요. "
                              "카드를 위해 올린 사진이라면 카드 전용으로 옮기세요.") if extras else ""
         extras_box.data = extras
-        aspect_dd.disabled = not is_tri()
-        aspect_note.value = "" if is_tri() else "카드 크기는 3단 디자인에서만 바꿀 수 있습니다(지금 디자인은 4:5로 그립니다)."
+        aspect_dd.disabled = not follows_aspect()
+        aspect_note.value = "" if follows_aspect() else "카드 크기는 온자람 디자인·3단 디자인에서만 바꿀 수 있습니다(지금 디자인은 4:5로 그립니다)."
         for c in (photo_note, aspect_dd, aspect_note, extras_box):
             _u(c)
 
@@ -185,6 +185,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             if not design_dd.value or S["sb"] is None:
                 design_dd.value = pack.get("layout_default") or design_dd.value
             type_hint.value = f"{pack.get('desc', '')} — {pack.get('fit', '')}"
+        # 이전 디자인은 설정에서 켰을 때만 목록에 — 이미 그 디자인으로 만든 글을 열었으면 그 디자인은 남긴다.
+        design_dd.options = [ft.DropdownOption(key=d.id, text=d.name)
+                             for d in design_templates.choices(keep=[design_dd.value])]
         sync_count()
         for c in (design_dd, type_hint, type_dd, count_dd):
             _u(c)
@@ -216,7 +219,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
 
         def _work() -> None:
             try:
-                items = preview.render_type_preview(pack, chosen_design, aspect_dd.value if is_tri() else "4:5")
+                items = preview.render_type_preview(pack, chosen_design, aspect_dd.value if follows_aspect() else "4:5")
             except Exception as exc:  # noqa: BLE001
                 say(f"❌ 미리보기를 만들지 못했습니다: {exc}", ok=False)
                 return
@@ -286,7 +289,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                 run_job("AI 이미지를 만드는 중입니다", lambda progress: ai_job(progress, None))
             actions.append(ft.FilledButton(f"AI 이미지 {est['count']}장으로 채우기", on_click=go))
         else:
-            body.append(ft.Text("AI 이미지를 쓰려면 ⚙️ 설정 → 🤖 모델 등록에서 'AI 이미지 생성 모델'을 지정하세요. 또는 [사진 올리기]로 내 사진을 넣으세요.",
+            body.append(ft.Text("AI 이미지를 쓰려면 ⚙️ 설정 → 🤖 AI 연결·모델에서 'AI 이미지 생성 모델'을 지정하세요. 또는 [사진 올리기]로 내 사진을 넣으세요.",
                                 size=fs(11, scale), color=BRAND_COLORS["text_muted"]))
         page.show_dialog(ft.AlertDialog(modal=True, title=ft.Text("가운데 사진 칸이 비어 있어요"),
                                         content=ft.Column(body, tight=True, spacing=8), actions=actions))
@@ -298,7 +301,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             sb, report = outputs.plan_for_campaign(
                 S["cid"], type_id=outputs.ONE_CARD_TYPE if one else type_dd.value,
                 design_id=design_templates.with_palette(design_dd.value, palette_dd.value),
-                aspect=aspect_dd.value if is_tri() else "4:5",
+                aspect=aspect_dd.value if follows_aspect() else "4:5",
                 use_ai=ai_switch.value, image_mode=mode_dd.value, source=source_field.value or None,
                 count=None if one else int(count_dd.value or 0) or None,
             )
@@ -311,7 +314,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             if len(mine) > placed and (sb.image_mode != "ai_first"):
                 photo_msg = (f"\n📷 올린 사진 {len(mine)}장 중 {placed}장을 넣었습니다 — 이 디자인·카드 종류에서 사진이 들어가는 카드가 "
                              f"{len(images.photo_slot_indexes(sb))}장뿐입니다. 나머지 사진은 ② 다듬기의 '사진'에서 카드마다 골라 넣거나, "
-                             "사진 칸이 많은 '3단' 디자인으로 바꿔 보세요.")
+                             "카드 장수를 늘려 보세요.")
             return f"✅ 카드 {len(paths)}장을 만들었습니다. 왼쪽에서 확인하고, 고칠 곳은 아래 ② 다듬기에서 고치세요." + \
                    (f" (⚠️ {len(warn)}건 확인 필요)" if warn else "") + photo_msg
 
@@ -595,8 +598,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                         ft.Row([ft.FilledButton("적용 (이 카드 다시 그리기)", icon=ft.Icons.CHECK, on_click=on_apply)]), ft.Divider(), bulk)
 
     # ------------------------------------------------------------------ 3단계: 쇼츠
-    seconds_dd = ft.Dropdown(label="목표 길이", width=120, dense=True, value="45",
-                             options=[ft.DropdownOption(key=str(n), text=f"{n}초") for n in (20, 30, 45, 60)])
+    seconds_dd = ft.Dropdown(label="목표 길이", width=120, dense=True, value=str(outputs.default_shorts_seconds()),
+                             options=[ft.DropdownOption(key=str(n), text=f"{n}초") for n in outputs.SHORTS_SECONDS])
     voice_dd = ft.Dropdown(label="목소리", width=300, dense=True, value="auto",
                            options=[ft.DropdownOption(key=v, text=l) for l, v in tts.VOICE_OPTIONS.items()])
     motion_dd = ft.Dropdown(label="사진 움직임", width=260, dense=True, value="dynamic",
@@ -608,13 +611,17 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     short_ai = ft.Switch(label="AI로 내레이션 다듬기", value=False)
     scene_refs: list = []
 
-    def apply_scenes() -> None:
+    def apply_scenes(mark_fresh: bool = True) -> None:
+        """대본 칸의 값을 저장. mark_fresh=False(메뉴를 떠날 때 자동 저장)면 '카드가 바뀌었다' 표시는 그대로 둔다."""
         sb = S["sb"]
+        if sb is None:
+            return
         for scene, cap, nar in scene_refs:
             scene.display_caption, scene.narration_script = cap.value or "", nar.value or ""
             scene.duration_seconds = max(shorts_script.MIN_SCENE_SEC, round(len(scene.narration_script) / shorts_script.CHARS_PER_SEC, 1))
         if scene_refs:
-            sb.shorts_source_hash = shorts_script.card_hash(sb)
+            if mark_fresh:
+                sb.shorts_source_hash = shorts_script.card_hash(sb)
             save_storyboard(S["cid"], sb)
 
     def on_script(e: ft.Event) -> None:
@@ -663,6 +670,10 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         if not ffmpeg_tools.available():
             items.append(ft.Text("⚠️ FFmpeg를 찾을 수 없어 영상을 만들 수 없습니다.", size=fs(11, scale), color="#B3261E"))
         items.append(ft.Row([seconds_dd, voice_dd, motion_dd, text_motion_dd, transition_dd], spacing=8, wrap=True))
+        if design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout):
+            items.append(ft.Text("온자람 디자인 쇼츠: 지금 읽는 문장이 아래 큰 자막으로 나오고, 사진은 사진 칸 안에서만 움직이며, "
+                                 "목록 칸은 음성에 맞춰 하나씩 나타납니다('글자 움직임 없음'이면 처음부터 다 보임).",
+                                 size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
         items.append(ft.Row([short_ai], wrap=True))
         items.append(ft.FilledButton("카드에서 대본 만들기", icon=ft.Icons.AUTO_AWESOME, on_click=on_script))
         if sb.shorts_scenes:
@@ -712,6 +723,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         selector.value = pick
         if pick:
             S["cid"] = pick
+            state.current_campaign_id = pick
             S["sync_from_sb"] = True
             reload_state()
             draw()
@@ -719,13 +731,25 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     def on_pick(e: ft.Event) -> None:
         apply_edits(save_only=True)
         S["cid"], S["idx"] = selector.value, 0
+        state.current_campaign_id = selector.value
         S["report"] = None
         S["sync_from_sb"] = True
         reload_state()
         draw()
 
     selector.on_select = on_pick
-    preferred = state.studio_campaign_id
+
+    def before_leave(proceed) -> None:
+        """다른 메뉴로 가기 전에 ② 다듬기·쇼츠 대본 칸의 수정을 조용히 저장한다([적용]을 안 눌러도 잃지 않게)."""
+        try:
+            apply_edits(save_only=True)
+            apply_scenes(mark_fresh=False)
+        except Exception as exc:  # noqa: BLE001
+            print(f"[studio] 떠나기 전 저장 실패: {exc}")
+        proceed()
+
+    state.before_leave = before_leave
+    preferred = state.studio_campaign_id or state.current_campaign_id
     state.studio_campaign_id = None
     refresh_selector(preferred)
     if not S["cid"]:

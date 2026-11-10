@@ -147,7 +147,6 @@ class TriLayoutMixin:
     def _tri_overlays(self, img: Image.Image, ctx, m0: int, m1: int, make_qr, caption: bool = True) -> None:
         """사진 위 캡션(왼쪽 아래)과 QR(오른쪽 아래)."""
         W = self.WIDTH
-        draw = ImageDraw.Draw(img)
         qr = make_qr(ctx.el)
         if caption:
             self._tri_photo_text(img, ctx, m0, m1, reserve_right=180 if qr is not None else 0)

@@ -1182,7 +1182,7 @@ def _proofread_sns(instagram: dict, shorts: dict, brand_kit: dict, vendor: str) 
 # 만듭니다 — SNS 글은 그 본문을 원문으로 삼아 씁니다.
 SNS_CHANNELS = {
     "instagram": "📸 인스타그램",
-    # 쇼츠 대본은 카드 기준(🎬 쇼츠 영상 탭, cards/shorts_script.py) 한 가지로 통일했습니다. 예전 컷 자막 생성은 끕니다
+    # 쇼츠 대본은 카드 기준(🃏 카드·쇼츠 화면, cards/shorts_script.py) 한 가지로 통일했습니다. 예전 컷 자막 생성은 끕니다
     # (이미 만들어 둔 내용은 그대로 남습니다).
 }
 

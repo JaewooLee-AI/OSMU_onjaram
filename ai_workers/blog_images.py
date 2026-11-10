@@ -35,11 +35,11 @@ def describe(est: Dict[str, Any]) -> str:
     if est["slots"] == 0:
         return "AI 이미지를 넣을 '사진 자리'가 없습니다(사진을 이미 넣었거나 서식 강도가 '없음'입니다)."
     if est["model"] is None:
-        return "'이미지 생성' 모델이 없거나 꺼져 있습니다(⚙️ 설정 → 🤖 모델 등록에서 지정하고 '사용'을 켜세요)."
+        return "'이미지 생성' 모델이 없거나 꺼져 있습니다(⚙️ 설정 → 🤖 AI 연결·모델에서 지정하고 '사용'을 켜세요)."
     name = est["model"]["display_name"]
     more = f" (사진 자리 {est['slots']}곳 중 앞의 {est['count']}곳)" if est["slots"] > est["count"] else ""
     if est["total_usd"] is None:
-        return f"AI 이미지 {est['count']}장{more} · 모델 {name} · 단가 미등록(모델 등록에서 입력하면 예상 금액이 보입니다)"
+        return f"AI 이미지 {est['count']}장{more} · 모델 {name} · 단가 미등록(⚙️ 설정 → 🤖 AI 연결·모델에서 입력하면 예상 금액이 보입니다)"
     return f"AI 이미지 {est['count']}장{more} · 모델 {name} · 예상 ${est['total_usd']:.3f} (장당 ${est['per_image']:g})"
 
 
@@ -63,7 +63,7 @@ def generate(campaign_id: str, generate_fn: Optional[images.GenerateFn] = None, 
         return result
     model = est["model"]
     if model is None:
-        raise RuntimeError("'이미지 생성' 모델이 지정되지 않았습니다. ⚙️ 설정 → 🤖 모델 등록에서 지정하세요.")
+        raise RuntimeError("'이미지 생성' 모델이 지정되지 않았습니다. ⚙️ 설정 → 🤖 AI 연결·모델에서 지정하세요.")
     if generate_fn is None:
         if model["vendor"] != "google":
             raise RuntimeError(f"이미지 생성은 현재 Google(Gemini) 모델만 지원합니다(지정된 모델: {model['vendor']}).")

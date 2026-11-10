@@ -120,3 +120,12 @@ def palette_row(scale: float = DEFAULT_FONT_SCALE) -> ft.Control:
         for key, label in names.items()
     ]
     return ft.Row(swatches, spacing=16)
+
+
+def display_title(c: dict, limit: int = 40) -> str:
+    """글을 목록에 보일 이름. 제목 → 원문 제목 → 메모 첫 줄 → '(제목 없음 · 만든 날)' 순(내부 id는 보여 주지 않음)."""
+    title = (c.get("title") or c.get("source_title") or "").strip()
+    if not title:
+        memo = next((ln.strip() for ln in (c.get("memo") or "").splitlines() if ln.strip()), "")
+        title = f"✎ {memo}" if memo else f"(제목 없음 · {(c.get('created_at') or '')[:10]})".replace(" · )", ")")
+    return title if len(title) <= limit else title[:limit - 1] + "…"

@@ -12,7 +12,6 @@ from ai_workers.photo_placement import split_segments
 # The X preview splits exactly as the generation-time check does (X-weighted
 # length, sentence boundaries), so the simulator can't show a split the
 # published thread won't have, or hide one it will.
-from ai_workers.sns_validator import split_tweet  # noqa: F401 (re-exported)
 
 MAX_MEDIA = 4
 

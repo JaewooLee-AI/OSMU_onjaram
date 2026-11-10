@@ -11,8 +11,8 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from cards.schema import ShortsScene, EditableStoryboard, MediaAsset
 from cards.fonts import korean_font, display_font, wrap_text_px, text_height
 from cards import brand as bk
-from cards import ffmpeg_tools
-from cards.card_renderer import tint, _rgb
+from cards import ffmpeg_tools, shorts_ed, shorts_script
+from cards.card_renderer import _rgb
 SCENE_GAP = 0.3  # 씬 사이 호흡(초)
 
 
@@ -23,12 +23,13 @@ class ShortsOptions:
     caption_style: str = "basic"        # (kinetic 전용) basic(기본 팝업) | kinetic(키네틱 타이포)
     voice: str = "auto"                 # auto | Gemini 목소리 이름 | free(무료 gTTS)
     tts_call: Any = None                # 시험용: 음성 합성 호출을 대신하는 async 함수
-    photo_motion: str = "none"          # (tri 전용) none(정지) | zoom_in | zoom_out | alternate(확대·축소 번갈아) | dynamic(확대·축소+좌우상하 이동을 장면마다 바꿔 씀) — 가운데 사진 칸만 움직임
-    text_motion: str = "none"           # (tri 전용) none | slide(제목은 위에서·아래 글자는 아래에서 미끄러져 들어오며 나타남)
+    photo_motion: str = "none"          # (3단·에디토리얼) none(정지) | zoom_in | zoom_out | alternate(확대·축소 번갈아) | dynamic(확대·축소+좌우상하 이동을 장면마다 바꿔 씀) — 가운데 사진 칸만 움직임
+    text_motion: str = "none"           # none | slide — 3단: 제목은 위에서·아래 글자는 아래에서 미끄러져 들어옴 / 에디토리얼: 목록 칸이 음성에 맞춰 하나씩 나타남
     transition: str = "none"            # (tri 전용) none | auto(장면 사이 전환 효과 — 장면마다 다른 효과를 돌려 씀)
     video_scope: str = "none"           # none | opening | key2 | all  (AI 영상화 범위)
     video_mode: str = "image"           # image(사진 움직이기) | link(다음 장면 사진까지 이어서)
     video_overrides: Optional[Dict[int, MediaAsset]] = None  # {장면 인덱스: AI 동영상} — 해당 장면 배경만 교체
+    media_overrides: Optional[Dict[int, Any]] = None  # (에디토리얼) {장면 인덱스: shorts_ed.SceneMedia} — 사진 칸에 이미지 두 장·영상 클립 등을 직접 지정
 
 
 class ShortsRendererService:
@@ -144,10 +145,11 @@ class ShortsRendererService:
             if card_mode:
                 sb2 = storyboard
                 frames = CardNewsRendererService(export_dir=os.path.join(work_dir, "frames"))
-                if design.layout == "ed":
-                    # 에디토리얼은 비율을 따라 그릴 수 있으므로 쇼츠 화면(9:16)에 맞춰 처음부터 그린다(빈 띠 없음).
-                    # 위·아래는 유튜브·인스타 버튼에 가리는 영역이라 비워 둔다.
-                    frames.HEIGHT, frames.safe_top, frames.safe_bottom = self.HEIGHT, self.ED_SAFE_TOP, self.ED_SAFE_BOTTOM
+                if design_templates.native_shorts(design.layout):
+                    # 에디토리얼·신뢰 리포트는 쇼츠 전용 화면으로 그린다(shorts_ed): 9:16에 맞춰 처음부터 그리고, 위·아래 UI 가림 영역과
+                    # 큰 자막 띠(아래 가림 영역 바로 위)를 비워 둔다. 사진 칸·목록 칸은 장면 합성 때 따로 움직인다.
+                    frames.HEIGHT, frames.safe_top = self.HEIGHT, self.ED_SAFE_TOP
+                    frames.safe_bottom = self.ED_SAFE_BOTTOM + shorts_ed.CAPTION_H
                     frames.FOLLOW_ASPECT = False
                     frames.ED_SHORTS = True
             else:
@@ -163,7 +165,9 @@ class ShortsRendererService:
             _, (m0, m1), _ = frames._tri_zones(design.ratio if design.layout == "tri" else [2, 5, 3])
             if card_mode:
                 m0 = m1 = 0
-            animated = motion != "none" or text_motion or use_trans
+            ed_native = design_templates.native_shorts(design.layout)
+            animated = motion != "none" or text_motion or use_trans or ed_native
+            shown_cards: set = set()
             listing, last, moved = [], None, 0
             seg_frames: List[Tuple[str, int]] = []
             n_scenes = len(timeline)
@@ -173,6 +177,30 @@ class ShortsRendererService:
                 idx = max(0, min(source, len(storyboard.card_slides)) - 1)
                 path = await frames.render_slide(sb2, idx)
                 dur = item["end"] - item["start"]
+                if ed_native:
+                    regions = dict(getattr(frames, "ed_regions", None) or {})
+                    regions["rows"] = list(regions.get("rows") or [])
+                    b_f, e_f = round(item["start"] * fps), round(item["end"] * fps)
+                    lead = half if (use_trans and n > 0) else 0
+                    tail = half if (use_trans and n < n_scenes - 1) else 0
+                    n_frames = max(2, (e_f + tail) - (b_f - lead)) if use_trans else max(2, int(round(dur * fps)))
+                    if motion == "alternate":
+                        kind = "zoom_in" if n % 2 == 0 else "zoom_out"
+                    elif motion == "dynamic":
+                        kind = f"dyn{n % len(self.DYNAMIC_MOTIONS)}"
+                    else:
+                        kind = motion
+                    media = shorts_ed.media_for(storyboard, scene, storyboard.card_slides[idx], self.options.media_overrides, n)
+                    seg = os.path.join(work_dir, f"seg_{n:02d}.mp4")
+                    await self._ed_scene_segment(path, regions, scene, media, kind, n_frames, lead / fps, item["speech"],
+                                                 seg, work_dir, f"{n:02d}", already_shown=(idx in shown_cards) or not text_motion,
+                                                 slide=storyboard.card_slides[idx])
+                    shown_cards.add(idx)
+                    moved += 1 if (media is not None and (motion != "none" or media.moves_by_itself)) else 0
+                    seg_frames.append((seg, n_frames))
+                    listing.append((seg, dur))
+                    last = seg
+                    continue
                 if card_mode:
                     bg_path, card_path, cy, path = self._card_canvas(path, work_dir, f"{n:02d}", scene)
                 if animated:
@@ -207,7 +235,7 @@ class ShortsRendererService:
                     seg_frames.append((seg, n_frames))
                 listing.append((path, dur))
                 last = path
-            if motion != "none" and not moved and not card_mode:
+            if motion != "none" and not moved and (ed_native or not card_mode):
                 self.last_warnings.append("사진이 들어간 장면이 없어 움직임을 적용하지 못했습니다(카드에 사진을 넣으면 가운데 사진이 움직입니다).")
             video_in = None
             if use_trans:
@@ -380,6 +408,71 @@ class ShortsRendererService:
                 while display_font(size, contact).getlength(contact) > W - 160 and size > 20:
                     size -= 2
                 d.text((W // 2, H - 44), contact, font=display_font(size, contact), fill=sub, anchor="mm")
+
+    async def _ed_scene_segment(self, frame_path: str, regions: dict, scene: ShortsScene, media, motion: str, frames: int,
+                                t0: float, speech: float, out: str, work_dir: str, tag: str, already_shown: bool = False,
+                                slide=None) -> None:
+        """에디토리얼 쇼츠 장면 하나 → `frames`장짜리 H.264 조각(shorts_ed 참고).
+        t0: 조각 안에서 이 장면의 음성이 시작하는 시각(앞 전환 겹침만큼 뒤). 사진 칸 미디어 합성이 실패하면 정지 사진으로 다시 만든다."""
+        W, H, fps = self.WIDTH, self.HEIGHT, self.FPS
+        base, rows = shorts_ed.split_layers(frame_path, regions, work_dir, tag)
+        seg_end = frames / fps
+        cap_y = H - self.ED_SAFE_BOTTOM - shorts_ed.CAPTION_H
+        chunks = shorts_ed.caption_chunks(scene.narration_script, W - 2 * int(regions.get("pad") or 72) - 64)
+        caps = []
+        for i, (text, (a, b)) in enumerate(zip(chunks, shorts_ed.caption_times(chunks, t0, speech, seg_end))):
+            caps.append((shorts_ed.caption_png(text, os.path.join(work_dir, f"cap_{tag}_{i}.png"), W, regions), a, b))
+        items = shorts_script.list_items(slide) if slide is not None else []
+        if len(items) == len(rows):
+            row_at = shorts_ed.row_times_from_text(scene.narration_script, items, t0, speech, already_shown)
+        else:
+            row_at = shorts_ed.row_times(len(rows), t0, speech, already_shown)
+        photo = regions.get("photo")
+        use_media = bool(photo and media is not None and (motion != "none" or media.moves_by_itself))
+
+        def build(with_media: bool) -> List[str]:
+            inputs = ["-loop", "1", "-framerate", str(fps), "-i", base]
+            chains, cur, idx = [], "0:v", 1
+            if with_media:
+                x0, y0, x1, y1 = photo["box"]
+                w, h = x1 - x0, y1 - y0
+                mv = self._zone_motion_expr(motion, frames) if motion != "none" else None
+                for args in shorts_ed.media_inputs(media, fps):
+                    inputs += args
+                parts, label = shorts_ed.media_chain(media, idx, w, h, frames, fps, mv)
+                idx += 2 if media.kind == "image_pair" else 1
+                inputs += ["-loop", "1", "-framerate", str(fps), "-i",
+                           shorts_ed.mask_png(os.path.join(work_dir, f"mask_{tag}.png"), w, h, photo.get("radius", 32))]
+                chains += parts
+                chains.append(f"[{idx}:v]format=gray[mk];[{label}]format=rgba[mr];[mr][mk]alphamerge[ma];"
+                              f"[{cur}][ma]overlay={x0}:{y0}:shortest=1[c_m]")
+                cur, idx = "c_m", idx + 1
+            for i, ((rp, rx, ry), at) in enumerate(zip(rows, row_at)):
+                inputs += ["-loop", "1", "-framerate", str(fps), "-i", rp]
+                if already_shown:
+                    chains.append(f"[{cur}][{idx}:v]overlay={rx}:{ry}:shortest=1[c_r{i}]")
+                else:
+                    d, px = shorts_ed.ROW_FADE, shorts_ed.ROW_RISE
+                    chains.append(f"[{idx}:v]format=rgba,fade=t=in:st={at:.3f}:d={d}:alpha=1[r{i}]")
+                    chains.append(f"[{cur}][r{i}]overlay=x={rx}:y='{ry}+{px}*pow(clip(1-(t-{at:.3f})/{d},0,1),3)':eval=frame:shortest=1[c_r{i}]")
+                cur, idx = f"c_r{i}", idx + 1
+            for i, (cp, a, b) in enumerate(caps):
+                inputs += ["-loop", "1", "-framerate", str(fps), "-i", cp]
+                chains.append(f"[{idx}:v]format=rgba,fade=t=in:st={a:.3f}:d={shorts_ed.CAP_FADE}:alpha=1[k{i}]")
+                chains.append(f"[{cur}][k{i}]overlay=0:{cap_y}:enable='between(t,{a:.3f},{b:.3f})':shortest=1[c_k{i}]")
+                cur, idx = f"c_k{i}", idx + 1
+            chains.append(f"[{cur}]setsar=1,format=yuv420p[v]")
+            return [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(chains), "-map", "[v]",
+                    "-frames:v", str(frames), "-pix_fmt", "yuv420p", *ffmpeg_tools.h264_args("good", "veryfast"), "-r", str(fps), out]
+
+        if use_media:
+            try:
+                await self._run(build(True), "사진 칸 미디어 합성 실패")
+                return
+            except RuntimeError as ex:
+                logging.getLogger(__name__).warning(f"{ex} → 정지 사진으로 다시 만듦")
+                self.last_warnings.append(f"{int(tag) + 1}번째 장면의 사진 칸 움직임을 넣지 못해 정지 사진으로 만들었습니다.")
+        await self._run(build(False), "에디토리얼 쇼츠 장면 생성 실패")
 
     ED_SAFE_TOP = 120      # 에디토리얼 9:16: 위쪽 UI(채널명·검색) 가림 영역
     ED_SAFE_BOTTOM = 240   # 아래쪽 UI(설명·버튼) 가림 영역
@@ -825,7 +918,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                   f"boxblur=24:3,eq=brightness=-0.12[bg];[b]scale={W}:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2")
         if punch:
             # 오프닝: 처음 0.5초 동안 확대 상태에서 빠르게 제자리로 (펀치 줌)
-            pz = f"if(lt(t\\,0.5)\\,1.18-0.36*t\\,1)"
+            pz = "if(lt(t\\,0.5)\\,1.18-0.36*t\\,1)"
             vf += f",scale=w='trunc(iw*{pz}/2)*2':h='trunc(ih*{pz}/2)*2':eval=frame,crop={W}:{H}"
         cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error"]
         if loop:

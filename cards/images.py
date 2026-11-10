@@ -19,7 +19,6 @@ import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from cards import design_templates
-from cards.paths import DATA_DIR  # noqa: F401  (경로 규칙을 한곳에서 확인하려는 용도)
 from cards.schema import EditableStoryboard, MediaAsset
 from core import repo
 from core.crypto_utils import decrypt_api_key
@@ -120,10 +119,10 @@ def describe_estimate(est: Dict[str, Any]) -> str:
         return "AI로 만들 칸이 없습니다(사진 칸이 모두 내 사진이거나 이미지 모드가 '내 사진만'입니다) — 비용이 들지 않습니다."
     if est["model"] is None:
         return (f"AI 이미지 {est['count']}장이 필요하지만 '이미지 생성' 모델이 없거나 꺼져 있습니다"
-                "(⚙️ 설정 → 🤖 모델 등록에서 지정하고 '사용'을 켜세요).")
+                "(⚙️ 설정 → 🤖 AI 연결·모델에서 지정하고 '사용'을 켜세요).")
     name = est["model"]["display_name"]
     if est["total_usd"] is None:
-        return f"AI 이미지 {est['count']}장 · 모델 {name} · 단가 미등록(모델 등록에서 이미지 단가를 입력하면 예상 금액이 보입니다)"
+        return f"AI 이미지 {est['count']}장 · 모델 {name} · 단가 미등록(⚙️ 설정 → 🤖 AI 연결·모델에서 이미지 단가를 입력하면 예상 금액이 보입니다)"
     return f"AI 이미지 {est['count']}장 · 모델 {name} · 예상 ${est['total_usd']:.3f} (장당 ${est['per_image']:g})"
 
 
@@ -138,7 +137,7 @@ def build_prompt(sb: EditableStoryboard, index: int) -> str:
 def _gemini_key() -> str:
     setting = repo.get_llm_setting("google")
     if not setting or not setting.get("is_active"):
-        raise RuntimeError("Gemini API 키가 없습니다. ⚙️ 설정 → 🔑 LLM 벤더에서 Google 키를 등록하세요.")
+        raise RuntimeError("Gemini API 키가 없습니다. ⚙️ 설정 → 🤖 AI 연결·모델의 간편 설정에서 Google 키를 넣으세요.")
     return decrypt_api_key(setting["encrypted_api_key"])
 
 
@@ -198,7 +197,7 @@ def generate_missing(
         return result
     model = est["model"]
     if model is None:
-        raise RuntimeError("'이미지 생성' 모델이 지정되지 않았습니다. ⚙️ 설정 → 🤖 모델 등록에서 지정하세요.")
+        raise RuntimeError("'이미지 생성' 모델이 지정되지 않았습니다. ⚙️ 설정 → 🤖 AI 연결·모델에서 지정하세요.")
     if generate is None:
         if model["vendor"] != "google":
             raise RuntimeError(f"이미지 생성은 현재 Google(Gemini) 모델만 지원합니다(지정된 모델: {model['vendor']}).")

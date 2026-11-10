@@ -56,6 +56,29 @@ def _items(body: str) -> List[str]:
     return out
 
 
+_END_RE = re.compile(r"(?:[.?!。]|[다요죠까]|니다|세요)$")
+_ORDINALS = ("첫째", "둘째", "셋째", "넷째", "다섯째", "여섯째")
+
+
+def _prose_sentences(body: str) -> List[str]:
+    """카드 본문(화면용으로 줄을 나눈 글)을 실제 문장으로 되돌린다. 문장 끝(마침표·~다·~요 등)이 아닌 줄은 다음 줄과 잇는다.
+    예: '중요한 과제를 마주하면 우리 뇌는' + '스스로를 보호하기 위해 에너지를 모아요.' → 한 문장."""
+    out, cur = [], ""
+    for line in _items(body):
+        cur = f"{cur} {line}".strip()
+        if _END_RE.search(_clean(line)):
+            out.append(_sentence(cur))
+            cur = ""
+    if cur:
+        out.append(_sentence(cur))
+    return out
+
+
+def list_items(card: CardSlide) -> List[str]:
+    """목록 카드의 항목(화면의 목록 칸과 같은 순서)."""
+    return [_clean(x) for x in _items(card.body_content)]
+
+
 def _numbers(text: str) -> set:
     return {n.strip(".,").replace(",", "") for n in _NUM_RE.findall(text or "") if n.strip(".,")}
 
@@ -66,22 +89,25 @@ def _cta_narration(brand) -> str:
 
 
 def _card_narration(card: CardSlide, budget: int) -> str:
-    """카드 하나의 내레이션(글자 예산 안에서 항목을 차례로 이어 붙인다)."""
+    """카드 하나의 내레이션. 문장은 절대 중간에서 끊지 않는다(글자 예산은 문장 단위로만 적용).
+    목록 카드는 화면에 칸이 하나씩 나타나므로 예산과 상관없이 모든 항목을 읽는다."""
     head = _sentence(card.lead_headline)
-    pieces: List[str] = []
-    if card.slide_type == "big_number" and card.stat_value:
-        pieces.append(_sentence(f"{card.stat_label} {card.stat_value}".strip()))
-    elif card.slide_type in ("steps", "numbered", "checklist"):
-        for i, item in enumerate(_items(card.body_content)):
-            pieces.append(_sentence(("첫째, " if i == 0 else "둘째, " if i == 1 else "셋째, " if i == 2 else "") + _clean(item)))
-    else:
-        pieces += [_sentence(x) for x in _items(card.body_content)]
-    text = head
     head_key = _clean(card.lead_headline)
-    for piece in pieces:
-        if _clean(re.sub(r"^(첫째|둘째|셋째), ", "", piece)) == head_key:   # 제목과 같은 항목은 두 번 읽지 않는다
+    if card.slide_type == "big_number" and card.stat_value:
+        return f"{head} {_sentence(f'{card.stat_label} {card.stat_value}'.strip())}".strip()
+    if card.slide_type in ("steps", "numbered", "checklist"):
+        pieces = []
+        for i, item in enumerate(list_items(card)):
+            if not item:
+                continue
+            ordinal = _ORDINALS[i] + ", " if card.slide_type != "checklist" and i < len(_ORDINALS) else ""
+            pieces.append(_sentence(ordinal + item))
+        return " ".join([head] + pieces).strip()
+    text = head
+    for piece in _prose_sentences(card.body_content):
+        if _clean(piece) == head_key:   # 제목과 같은 문장은 두 번 읽지 않는다
             continue
-        if len(text) + 1 + len(piece) > budget and text != head:
+        if len(text) + 1 + len(piece) > budget:   # 넘치면 그 문장부터는 읽지 않는다(문장 중간에서 자르지 않음)
             break
         text = f"{text} {piece}".strip()
     return text
@@ -93,7 +119,11 @@ def _rule_based(sb: EditableStoryboard, seconds: int, brand) -> List[Dict[str, A
     has_cta = any(c.slide_type == "call_to_action" for c in cards)
     cta_chars = len(_cta_narration(brand))
     budget_total = max(60, int(seconds * CHARS_PER_SEC) - (cta_chars if has_cta else 0))
-    per_card = max(30, budget_total // max(1, len(body)))
+    # 목록 카드는 모든 항목을 읽으므로(화면에 칸이 하나씩 나타남) 그 길이를 먼저 빼고, 남은 예산을 글 카드에 나눈다.
+    lists = [c for c in body if c.slide_type in ("steps", "numbered", "checklist", "big_number")]
+    used = sum(len(_card_narration(c, 0)) for c in lists)
+    pool = max(0, budget_total - used)
+    prose_left = max(0, len(body) - len(lists))
     scenes: List[Dict[str, Any]] = []
     for i, card in enumerate(cards):
         number = card.slide_number or i + 1
@@ -102,8 +132,15 @@ def _rule_based(sb: EditableStoryboard, seconds: int, brand) -> List[Dict[str, A
                            "display_caption": _clean(card.lead_headline)[:30], "emphasis_words": []})
             continue
         _, terms = emphasis.parse(card.lead_headline)
+        if card in lists:
+            narration = _card_narration(card, 0)
+        else:   # 남은 예산을 남은 글 카드에 나눠 주고(쓰고 남으면 다음 카드로), 한 문장이 조금 넘치는 정도(25%)는 허용
+            share = pool / max(1, prose_left)
+            narration = _card_narration(card, int(share * 1.25))
+            pool = max(0, pool - len(narration))
+            prose_left -= 1
         scenes.append({"source_cards": [number], "section_type": "hook" if not scenes else "body",
-                       "narration_script": _card_narration(card, per_card),
+                       "narration_script": narration,
                        "display_caption": _clean(card.lead_headline)[:30], "emphasis_words": terms[:2]})
     if scenes and not has_cta:
         scenes[-1]["section_type"] = "conclusion"
@@ -185,6 +222,10 @@ def convert(sb: EditableStoryboard, kit_id: Optional[int] = None, seconds: int =
             duration_seconds=max(MIN_SCENE_SEC, round(len(narration) / CHARS_PER_SEC, 1)),
             asset_id=first.asset_id if first.slide_type not in ("call_to_action",) else None, emphasis_words=words, source_cards=sources,
         ))
+    est = sum(s.duration_seconds for s in scenes) + 0.3 * max(0, len(scenes) - 1)
+    if est > seconds * 1.2:
+        report["warnings"].append(f"대본이 목표 길이({seconds}초)보다 깁니다(약 {round(est)}초). 문장을 중간에서 자르지 않으려고 "
+                                  "그대로 두었습니다 — 더 짧게 하려면 목표 길이를 늘리거나, 'AI로 내레이션 다듬기'를 켜거나, 아래 대본에서 문장을 빼세요.")
     if report["blacklist_hits"]:
         terms = ", ".join(sorted({h["forbidden"] for h in report["blacklist_hits"]}))
         report["warnings"].append(f"금기어({terms})를 사전의 대체 표현으로 자동으로 바꿨습니다 — 문장이 어색하지 않은지 확인하세요.")

@@ -1,4 +1,4 @@
-"""⚙️ 설정 → 🤖 모델 등록 탭.
+"""⚙️ 설정 → 🤖 AI 연결·모델 탭.
 
 
 기능(슬롯)마다 쓸 모델을 **벤더 선택 + 모델 이름(버전 포함) 직접 입력 + 단가**로 한 줄에 등록합니다.
@@ -7,7 +7,7 @@
 
 - 글자(토큰) 단가는 `model_prices`, 이미지·영상·음성 단가는 모델 등록 행(per_image/per_second)에 저장됩니다.
 - '블로그 글 모델'·'사진 분석 모델'은 모델 이름을 비우면 기본 글쓰기 모델을 따릅니다.
-- API 키는 벤더마다 하나라서 🔑 LLM 벤더 탭에서 등록합니다.
+- API 키는 간편 설정(Google)에서 넣거나, 벤더마다 🔑 API 키 탭에서 등록합니다.
 """
 from __future__ import annotations
 
@@ -154,7 +154,7 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
                 return
             rebuild()
             say_after = "" if (repo.get_llm_setting(vendor.value) or {}).get("is_active") else \
-                " (이 벤더의 API 키는 🔑 LLM 벤더 탭에서 등록하세요)"
+                " (이 벤더의 API 키는 🔑 API 키 탭에서 등록하세요)"
             say(f"✅ 저장했습니다.{say_after}")
 
         def on_test(e: ft.Event) -> None:
@@ -164,7 +164,7 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
                 say("모델 이름을 먼저 입력하세요.", ok=False)
                 return
             if not setting:
-                say("이 벤더의 API 키가 없습니다 (🔑 LLM 벤더 탭)", ok=False)
+                say("이 벤더의 API 키가 없습니다 (🔑 API 키 탭)", ok=False)
                 return
             say("⏳ 테스트 중…")
 

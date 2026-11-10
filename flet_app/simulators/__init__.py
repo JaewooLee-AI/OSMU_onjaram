@@ -1,7 +1,7 @@
 """Channel simulators — native Flet control trees showing how a post will
 look on each channel before it is published.
 
-The data shaping (which image tag goes where, how a tweet gets cut, which
+The data shaping (which image tag goes where, where a caption folds, which
 photos are "extra") lives in `flet_app.simulators.base` /
 `ai_workers.photo_placement`; the modules here only turn it into controls.
 """

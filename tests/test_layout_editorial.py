@@ -62,3 +62,20 @@ def test_legacy_designs_listed_after_editorial():
     ids = [t.id for t in design_templates.list_all()]
     assert ids[0] == "editorial" and ids.index("editorial-photo") < ids.index("tri-2-5-3")
     assert design_templates.get("tri-2-5-3").name.startswith(design_templates.LEGACY_PREFIX)
+
+
+def test_legacy_designs_hidden_from_choices_unless_enabled_or_in_use():
+    from core import repo
+    legacy = [t.id for t in design_templates.list_all() if design_templates.is_legacy(t)]
+    assert legacy, "이전 디자인이 하나도 없으면 이 시험은 의미가 없다"
+    repo.save_app_settings(show_legacy_designs=False)
+    ids = [t.id for t in design_templates.choices()]
+    assert ids[0] == "editorial" and not set(ids) & set(legacy)
+    # 이미 이전 디자인으로 만든 글(배색이 붙은 id 포함)은 그 디자인만 남긴다
+    kept = [t.id for t in design_templates.choices(keep=["tri-2-5-3@navy"])]
+    assert "tri-2-5-3" in kept and not (set(kept) & set(legacy)) - {"tri-2-5-3"}
+    # 숨겨도 렌더용 get()은 그대로
+    assert design_templates.get("tri-2-5-3").layout == "tri"
+    repo.save_app_settings(show_legacy_designs=True)
+    assert set(legacy) <= {t.id for t in design_templates.choices()}
+    repo.save_app_settings(show_legacy_designs=False)

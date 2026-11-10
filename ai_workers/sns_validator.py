@@ -1,4 +1,6 @@
-"""Deterministic format checks for the Instagram, X, Shorts and Naver-tag outputs.
+"""Deterministic format checks for the Instagram, Shorts and Naver-tag outputs.
+
+(X(트위터) 채널은 M0에서 뺐고, 트윗 길이 검사·나누기 함수도 함께 지웠습니다.)
 
 The Naver path already follows this project's "verify, don't just instruct"
 rule twice over (compliance guardrail, SEO density). The social writers did
@@ -19,52 +21,7 @@ of silently rewriting.
 from __future__ import annotations
 
 import re
-import unicodedata
 from typing import Dict, List, Tuple
-
-# X's 280 is a *weighted* budget (twitter-text v3), not a character count:
-# code points in the ranges below weigh 1, everything else — every Hangul
-# syllable, CJK, emoji — weighs 2, and any URL weighs 23 however long it is.
-# A tweet in Korean therefore holds about 140 characters, not 280. These
-# limits used to be compared against len(), so 150~240-character Korean
-# tweets passed this check and were then refused by X.
-#
-# The writers aim at the soft limit, leaving room for a hashtag or an emoji
-# the marketer adds before posting.
-TWEET_SOFT_MAX = 260   # ≈130 Korean characters
-TWEET_HARD_MAX = 280   # ≈140 Korean characters — X refuses anything longer
-
-_X_LIGHT_RANGES = ((0x0000, 0x10FF), (0x2000, 0x200D), (0x2010, 0x201F), (0x2032, 0x2037))
-_X_URL_RE = re.compile(r"https?://\S+")
-X_URL_WEIGHT = 23
-
-
-def _x_char_weight(ch: str) -> int:
-    cp = ord(ch)
-    return 1 if any(lo <= cp <= hi for lo, hi in _X_LIGHT_RANGES) else 2
-
-
-def x_weighted_length(text: str) -> int:
-    """Length the way X counts it. Slightly conservative on multi-code-point
-    emoji (each code point counts 2 here, X counts the whole sequence as 2) —
-    over-counting can only split a tweet early, never let one through that X
-    would refuse."""
-    text = unicodedata.normalize("NFC", text or "")
-    urls = _X_URL_RE.findall(text)
-    rest = _X_URL_RE.sub("", text)
-    return len(urls) * X_URL_WEIGHT + sum(_x_char_weight(ch) for ch in rest)
-
-
-def _x_take(text: str, limit: int) -> str:
-    """Longest prefix of `text` within `limit` weighted units."""
-    total, out = 0, []
-    for ch in text:
-        w = _x_char_weight(ch)
-        if total + w > limit:
-            break
-        total += w
-        out.append(ch)
-    return "".join(out)
 
 # Instagram collapses the caption behind "더보기" after ~125 characters or
 # two lines, whichever comes first — a caption that opens with a short line
@@ -99,64 +56,6 @@ _SENTENCE_END_RE = re.compile(r"(?<=[.!?。？！])\s+|(?<=[다요])\.\s*")
 def _split_sentences(text: str) -> List[str]:
     parts = [p.strip() for p in _SENTENCE_END_RE.split(text) if p and p.strip()]
     return parts or [text.strip()]
-
-
-def _pack(sentences: List[str], limit: int) -> List[str]:
-    """Greedily groups sentences into chunks within `limit` X-weighted units."""
-    chunks: List[str] = []
-    current = ""
-    for sentence in sentences:
-        candidate = f"{current} {sentence}".strip() if current else sentence
-        if x_weighted_length(candidate) <= limit:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        # A single sentence longer than the limit has no clean break left;
-        # hard-wrap it rather than emit something unpostable.
-        while x_weighted_length(sentence) > limit:
-            head = _x_take(sentence, limit)
-            chunks.append(head)
-            sentence = sentence[len(head):]
-        current = sentence
-    if current:
-        chunks.append(current)
-    return chunks
-
-
-def split_tweet(text: str) -> List[str]:
-    """One tweet split to fit, the same way validate_tweets does — shared with
-    the X simulator so the preview can never disagree with the check."""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if x_weighted_length(text) <= TWEET_SOFT_MAX:
-        return [text]
-    return _pack(_split_sentences(text), TWEET_SOFT_MAX)
-
-
-def validate_tweets(tweets: List[str]) -> Tuple[List[str], List[Dict]]:
-    """Returns (tweets, issues) with any over-limit tweet split in place."""
-    fixed: List[str] = []
-    issues: List[Dict] = []
-    for idx, tweet in enumerate(tweets, start=1):
-        weight = x_weighted_length(tweet)
-        if weight <= TWEET_SOFT_MAX:
-            fixed.append(tweet)
-            continue
-        pieces = split_tweet(tweet)
-        issues.append(
-            {
-                "level": "fixed" if weight <= TWEET_HARD_MAX else "blocked",
-                "message": (
-                    f"{idx}번 트윗이 X 기준 {weight}/{TWEET_HARD_MAX}"
-                    f"(한글 1자 = 2)로 권장 {TWEET_SOFT_MAX}을 넘어 {len(pieces)}개로 나눴습니다."
-                    + (" 나누지 않았다면 X가 게시를 거부했을 길이입니다." if weight > TWEET_HARD_MAX else "")
-                ),
-            }
-        )
-        fixed.extend(pieces)
-    return fixed, issues
 
 
 def validate_instagram(caption: str, hashtags: List[str]) -> Tuple[str, List[str], List[Dict]]:

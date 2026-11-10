@@ -186,6 +186,7 @@ def render_one(campaign_id: str, sb: EditableStoryboard, index: int) -> list[str
 
 
 def build_card_tab(page: ft.Page, campaign: dict, scale: float, reload=None) -> ft.Control:
+    """(앱 화면에서는 쓰지 않음 — 🃏 카드·쇼츠 스튜디오가 대신함) 예전 카드뉴스 탭. 시험이 기획·편집·AI 이미지 로직을 이 화면으로 확인하고 있어 남겨 둠."""
     campaign_id = campaign["id"]
     sb = load_storyboard(campaign)
     state = {"sb": sb, "report": None}
@@ -194,7 +195,7 @@ def build_card_tab(page: ft.Page, campaign: dict, scale: float, reload=None) -> 
     body = ft.Column(spacing=10)
 
     types = card_types.available()
-    designs = design_templates.list_all()
+    designs = design_templates.choices(keep=[sb.design_id if sb else None])
     packs_by_id = {p["id"]: p for p in types}
     current_type = (sb.card_format if sb and sb.card_format in packs_by_id else (types[0]["id"] if types else None))
     type_dd = ft.Dropdown(label="카드 종류", width=300, dense=True, value=current_type,
@@ -350,7 +351,7 @@ def build_card_tab(page: ft.Page, campaign: dict, scale: float, reload=None) -> 
                                     on_click=lambda e: confirm_ai(est), disabled=est["count"] == 0 or est["model"] is None),
                     ft.OutlinedButton("사진 자동 배치", icon=ft.Icons.PHOTO_LIBRARY, on_click=lambda e: auto_place()),
                 ], spacing=8, wrap=True),
-                *([ft.Text("버튼이 꺼져 있는 이유: 'AI 이미지 생성' 모델이 지정되지 않았습니다(⚙️ 설정 → 🤖 모델 등록).",
+                *([ft.Text("버튼이 꺼져 있는 이유: 'AI 이미지 생성' 모델이 지정되지 않았습니다(⚙️ 설정 → 🤖 AI 연결·모델).",
                            size=fs(10, scale), color="#B3261E")] if est["count"] and est["model"] is None else []),
                 status_ai,
             ], spacing=6),

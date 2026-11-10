@@ -130,6 +130,8 @@ def main(page: ft.Page) -> None:
     def show(index: int) -> None:
         current_index[0] = index
         _, _, label, module = DESTINATIONS[index]
+        state.current_view = label
+        state.before_leave = None   # 새 화면이 필요하면 다시 넣는다
         body.content = module.build(page, state) if module else _placeholder(label)
         body.update()
 
@@ -150,29 +152,42 @@ def main(page: ft.Page) -> None:
             ft.NavigationRailDestination(icon=icon, selected_icon=selected_icon, label=label)
             for icon, selected_icon, label, _ in DESTINATIONS
         ],
-        on_change=lambda e: show(e.control.selected_index),
+        on_change=lambda e: request_show(e.control.selected_index),
     )
 
-    def go_to_workbench() -> None:
-        rail.selected_index = WORKBENCH_INDEX
+    def request_show(index: int) -> None:
+        """메뉴 이동. 지금 화면이 저장 안 한 수정을 갖고 있으면(before_leave) 먼저 묻고, 취소하면 그대로 머문다."""
+        guard = state.before_leave
+        if guard is None or index == current_index[0]:
+            rail.selected_index = index
+            show(index)
+            return
+        stay = current_index[0]
+        rail.selected_index = stay            # 결정하기 전까지는 지금 메뉴에 표시를 둔다
         rail.update()
-        show(WORKBENCH_INDEX)
+
+        def proceed() -> None:
+            rail.selected_index = index
+            rail.update()
+            show(index)
+        try:
+            guard(proceed)
+        except Exception as exc:  # noqa: BLE001 — 보호 장치가 고장 나도 이동은 막지 않는다
+            print(f"[main] before_leave 실패: {exc}")
+            proceed()
+
+    def go_to_workbench() -> None:
+        request_show(WORKBENCH_INDEX)
 
     state.navigate_to_workbench = go_to_workbench
 
     def go_to_studio() -> None:
-        idx = next(i for i, d in enumerate(DESTINATIONS) if d[3] is studio_view)
-        rail.selected_index = idx
-        rail.update()
-        show(idx)
+        request_show(next(i for i, d in enumerate(DESTINATIONS) if d[3] is studio_view))
 
     state.navigate_to_studio = go_to_studio
 
     def go_to_library() -> None:
-        idx = next(i for i, d in enumerate(DESTINATIONS) if d[3] is library_view)
-        rail.selected_index = idx
-        rail.update()
-        show(idx)
+        request_show(next(i for i, d in enumerate(DESTINATIONS) if d[3] is library_view))
 
     state.navigate_to_library = go_to_library
 

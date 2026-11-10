@@ -34,9 +34,9 @@ from ai_workers.multi_llm_router import (
     test_connection,
 )
 from core import repo, transfer
-from core.db import DATA_DIR
 from core.crypto_utils import decrypt_api_key, encrypt_api_key
 
+from flet_app.dialogs import confirm
 from flet_app.kit_picker import kit_dropdown
 from flet_app.views.model_registry_view import build_models_tab
 from flet_app.views.card_types_view import build_card_types_tab
@@ -175,7 +175,7 @@ def _vendor_card(
     registered_models = [m for m in repo.list_models("text", include_disabled=False) if m["vendor"] == vendor_key]
     model_field = ft.TextField(
         label="연결 테스트용 모델 ID",
-        helper="실제로 쓸 모델은 🤖 모델 등록 탭에서 고릅니다.",
+        helper="실제로 쓸 모델은 🤖 AI 연결·모델 탭에서 고릅니다.",
         value=(saved or {}).get("model_name") or (registered_models[0]["model_id"] if registered_models else ""),
     )
     key_field = ft.TextField(
@@ -256,7 +256,7 @@ def _vendor_card(
                 if auto_set_default or cur_default == vendor_key:
                     status.value = f"✅ {message} · 기본 글쓰기 모델로 지정됨"
                 else:
-                    status.value = f"✅ {message} · 저장됨 (기본 글쓰기 모델 변경은 🤖 모델 등록 탭)"
+                    status.value = f"✅ {message} · 저장됨 (기본 글쓰기 모델 변경은 🤖 AI 연결·모델 탭)"
                 status.color = "#1B6E3C"
                 badge.update()
                 delete_button.update()
@@ -293,7 +293,9 @@ def _vendor_card(
         on_vendor_change()
 
     test_button = ft.FilledButton("연결 테스트 · 저장", on_click=on_test, expand=True)
-    delete_button.on_click = on_delete
+    delete_button.on_click = lambda e: confirm(
+        page, f"{spec['label']} API 키를 삭제할까요?",
+        "저장한 키가 지워져 이 벤더의 모델을 쓰는 생성이 멈춥니다. 다시 쓰려면 키를 새로 입력해야 합니다.", lambda: on_delete(e))
 
     header = [ft.Text(f"{spec['icon']} {spec['label']}", weight=ft.FontWeight.BOLD, size=fs(14, scale))]
     if spec.get("note"):
@@ -335,7 +337,7 @@ def _build_llm_tab(page: ft.Page, scale: float, on_vendor_list_changed=None) -> 
             default_status.color = "#B3261E"
         else:
             default_status.value = ("아직 기본 글쓰기 모델이 없습니다. 아래 카드에서 [연결 테스트 · 저장]을 누르거나 "
-                                    "🤖 모델 등록 탭에서 지정하세요.")
+                                    "🤖 AI 연결·모델 탭에서 지정하세요.")
             default_status.color = "#B3261E"
         if live:
             default_status.update()
@@ -355,8 +357,8 @@ def _build_llm_tab(page: ft.Page, scale: float, on_vendor_list_changed=None) -> 
     return ft.Column(
         [
             ft.Text(
-                "벤더마다 API 키를 하나씩 등록합니다. 입력한 키는 AES-256-GCM으로 암호화되어 로컬 SQLite에 저장됩니다. "
-                "어떤 모델(이름·버전)을 어디에 쓸지는 🤖 모델 등록 탭에서 고릅니다.",
+                "Google만 쓴다면 이 탭은 필요 없습니다 — 첫 탭 '🤖 AI 연결·모델'의 간편 설정에 키를 넣으면 저장·모델·단가까지 끝납니다. "
+                "여기서는 벤더(Google·OpenAI·Anthropic)마다 키를 직접 등록·삭제합니다. 키는 AES-256-GCM으로 암호화되어 이 PC에만 저장됩니다.",
                 size=fs(12, scale),
                 color=BRAND_COLORS["text_muted"],
             ),
@@ -488,7 +490,8 @@ def _build_api_hub_section(page: ft.Page, scale: float, rebuild) -> ft.Control:
         _refresh_stats()
         rebuild()
 
-    delete_button.on_click = on_delete
+    delete_button.on_click = lambda e: confirm(
+        page, "네이버 API 키를 삭제할까요?", "저장한 키가 지워집니다. 다시 쓰려면 키를 새로 입력해야 합니다.", lambda: on_delete(e))
     test_button = ft.FilledButton("연결 테스트 · 저장", on_click=on_test)
 
     if saved:
@@ -614,7 +617,8 @@ def _build_searchad_section(page: ft.Page, scale: float, rebuild) -> ft.Control:
         delete_button.update()
         rebuild()
 
-    delete_button.on_click = on_delete
+    delete_button.on_click = lambda e: confirm(
+        page, "네이버 API 키를 삭제할까요?", "저장한 키가 지워집니다. 다시 쓰려면 키를 새로 입력해야 합니다.", lambda: on_delete(e))
     test_button = ft.FilledButton("연결 테스트 · 저장", on_click=on_test)
 
     return ft.Column(
@@ -1453,7 +1457,7 @@ def _build_vision_tab(scale: float) -> ft.Control:
     ]
     current_ref = repo.get_slots()["vision"]["model_ref"]
     vendor_dropdown = ft.Dropdown(
-        label="사진 분석 모델 (🤖 모델 등록 탭에 등록된 모델 중 API 키가 있는 것)",
+        label="사진 분석 모델 (🤖 AI 연결·모델 탭에 등록된 모델 중 API 키가 있는 것)",
         value=str(current_ref) if current_ref and any(m["id"] == current_ref for m in vision_models) else "",
         options=[ft.DropdownOption(key="", text=default_label)]
         + [ft.DropdownOption(key=str(m["id"]), text=f"{m['display_name']} · {m['model_id']}") for m in vision_models],
@@ -1574,7 +1578,7 @@ def _parse_amount(text: str | None) -> float | None:
 
 
 def _build_cost_section(scale: float, rebuild) -> list[ft.Control]:
-    """요청 3: 환율 · 월 예산 · 누적 금액 · 벤더·모델별 표(단가 입력은 🤖 모델 등록 탭)."""
+    """요청 3: 환율 · 월 예산 · 누적 금액 · 벤더·모델별 표(단가 입력은 🤖 AI 연결·모델 탭)."""
     rate = repo.get_usd_krw()
     budget = repo.get_monthly_budget_krw()
     today, month, total = repo.cost_today(), repo.cost_this_month(), repo.cost_all_time()
@@ -1664,7 +1668,7 @@ def _build_cost_section(scale: float, rebuild) -> list[ft.Control]:
                 size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
         status,
         ft.Divider(),
-        ft.Text("단가는 ⚙️ 설정 → 🤖 모델 등록에서 모델 이름과 함께 입력합니다. 여기서는 사용량과 금액만 봅니다.",
+        ft.Text("단가는 ⚙️ 설정 → 🤖 AI 연결·모델에서 모델 이름과 함께 입력합니다. 여기서는 사용량과 금액만 봅니다.",
                 size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
         ft.Divider(),
         ft.Text("벤더·모델별 사용량", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
@@ -1800,6 +1804,8 @@ def _build_channels_tab(scale: float) -> ft.Control:
     out_checks = {key: ft.Checkbox(label=label, value=key in out_now) for key, label in outputs.OUTPUT_LABELS.items()}
     status = ft.Text("", size=fs(12, scale))
     out_status = ft.Text("", size=fs(12, scale))
+    seconds_dd = ft.Dropdown(label="쇼츠 대본 기본 길이", width=220, dense=True, value=str(outputs.default_shorts_seconds()),
+                             options=[ft.DropdownOption(key=str(n), text=f"{n}초") for n in outputs.SHORTS_SECONDS])
 
     def on_save_outputs(e: ft.Event) -> None:
         chosen = [k for k, cb in out_checks.items() if cb.value]
@@ -1808,6 +1814,7 @@ def _build_channels_tab(scale: float) -> ft.Control:
             out_status.color = "#B3261E"
         else:
             outputs.save_default_outputs(chosen)
+            outputs.save_default_shorts_seconds(int(seconds_dd.value or 45))
             out_status.value = "✅ 저장했습니다 — 워크벤치의 [이번에 만들 것] 기본 체크가 됩니다(글마다 바꿀 수 있습니다)."
             out_status.color = "#1B6E3C"
         out_status.update()
@@ -1826,12 +1833,15 @@ def _build_channels_tab(scale: float) -> ft.Control:
             ft.Text("워크벤치에서 [만들기]를 누를 때 기본으로 체크해 둘 것입니다. 글마다 바꿔서 블로그만, 카드뉴스만, "
                     "카드뉴스 + 쇼츠처럼 만들 수 있습니다.", size=fs(12, scale), color=BRAND_COLORS["text_muted"]),
             *out_checks.values(),
+            seconds_dd,
+            ft.Text("워크벤치 [만들기]로 쇼츠 대본을 만들 때와 카드·쇼츠 화면의 '목표 길이' 처음 값입니다.",
+                    size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
             ft.FilledButton("기본 생성 대상 저장", on_click=on_save_outputs),
             out_status,
             ft.Divider(),
             ft.Text("블로그와 함께 만들 SNS 글", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
             ft.Text("끈 채널은 AI 호출을 하지 않아 비용이 들지 않고, 결과 탭에서도 빠집니다. 이미 만들어 둔 내용은 지우지 않습니다. "
-                    "쇼츠 대본은 카드 기준으로 한 가지만 만듭니다(🎬 쇼츠 영상 탭).",
+                    "쇼츠 대본은 카드 기준으로 한 가지만 만듭니다(🃏 카드·쇼츠 화면).",
                     size=fs(12, scale), color=BRAND_COLORS["text_muted"]),
             *checks.values(),
             ft.FilledButton("저장", on_click=on_save),
@@ -2026,8 +2036,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                     controls=[
                         ft.TabBar(
                             tabs=[
-                                ft.Tab(label="🔑 LLM 벤더"),
-                                ft.Tab(label="🤖 모델 등록"),
+                                ft.Tab(label="🤖 AI 연결·모델"),
+                                ft.Tab(label="🔑 API 키 (벤더별·고급)"),
                                 ft.Tab(label="🃏 카드 종류·디자인"),
                                 ft.Tab(label="📣 생성 채널"),
                                 ft.Tab(label="🔍 네이버 API"),
@@ -2039,8 +2049,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                         ft.TabBarView(
                             expand=True,
                             controls=[
-                                ft.Container(content=_build_llm_tab(page, scale, refresh_vision_tab), padding=10),
                                 ft.Container(content=build_models_tab(page, scale, refresh_vision_tab), padding=10),
+                                ft.Container(content=_build_llm_tab(page, scale, refresh_vision_tab), padding=10),
                                 ft.Container(content=build_card_types_tab(page, scale), padding=10),
                                 ft.Container(content=_build_channels_tab(scale), padding=10),
                                 ft.Container(content=_build_naver_tab(page, scale), padding=10),

@@ -34,8 +34,9 @@ from flet_app.components.collapsible import collapsible
 from flet_app import outputs
 from flet_app.image_src import image_or_placeholder
 from flet_app.kit_picker import kit_dropdown
+from flet_app.dialogs import ask_save_before_leave, confirm, confirm_delete_campaign
 from flet_app.state import AppState
-from flet_app.theme import BRAND_COLORS, STATUS_LABELS, fs
+from flet_app.theme import BRAND_COLORS, STATUS_LABELS, display_title, fs
 
 _STATUS_STYLES = {
     "success": ("#1B6E3C", "#E8F5E9"),
@@ -48,6 +49,11 @@ _STATUS_STYLES = {
 RECENT_LIMIT = 15     # 글 선택 목록에 보여 줄 최근 글 수(나머지는 📚 보관함)
 
 
+def _guard(page: ft.Page, name: str, dirty, save) -> None:
+    """저장하지 않은 수정 감시 등록. 메뉴를 떠날 때 dirty()가 참인 것을 모아 저장할지 묻는다(build의 before_leave)."""
+    getattr(page, "_wb_guards", []).append((name, dirty, save))
+
+
 def _status_box(text: str, scale: float, kind: str = "info") -> ft.Container:
     color, bg = _STATUS_STYLES[kind]
     return ft.Container(
@@ -58,9 +64,16 @@ def _status_box(text: str, scale: float, kind: str = "info") -> ft.Container:
 
 def _label(c: dict) -> str:
     icon = "📰" if c["source_type"] == "news" else "✍️"
-    title = c.get("title") or c.get("source_title") or c.get("source_url") or "(제목 없음)"
+    title = display_title(c, 40)
     kit = f" · 🧵{c['brand_kit_name']}" if c.get("brand_kit_name") else ""
-    return f"{icon} {title[:40]}{kit} · {STATUS_LABELS.get(c['status'], c['status'])}"
+    return f"{icon} {title}{kit} · {STATUS_LABELS.get(c['status'], c['status'])}"
+
+
+def _safe_dirty(fn) -> bool:
+    try:
+        return bool(fn())
+    except Exception:  # noqa: BLE001 — 칸이 이미 화면에서 빠졌으면 수정 없음으로 본다
+        return False
 
 
 def _is_untouched_draft(c: dict) -> bool:
@@ -176,6 +189,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     )
 
     def load_editor(campaign_id: str | None, live: bool) -> None:
+        page._wb_guards = []      # 이 글의 편집 칸들이 다시 등록한다
+        if campaign_id:
+            state.current_campaign_id = campaign_id
         if not campaign_id:
             content_box.content = empty_notice
             sim_box.content = ft.Text(
@@ -205,7 +221,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                     state.navigate_to_studio()
 
             content_box.content = _build_campaign_editor(
-                page, campaign_id, scale, reload, refresh_sim, refresh_selector_label, open_studio
+                page, campaign_id, scale, reload, refresh_sim, refresh_selector_label, open_studio, state
             )
             sim_box.content = _build_sim_panel(campaign_id, scale, sim_state, refresh_sim)
         if live:
@@ -233,9 +249,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         load_editor(selector.value, live=True)
 
     def on_delete(e: ft.Event) -> None:
-        if selector.value:
-            repo.delete_campaign(selector.value)
-            refresh_list()
+        c = repo.get_campaign(selector.value) if selector.value else None
+        if c:
+            confirm_delete_campaign(page, c, lambda: refresh_list())
 
     def on_new(e: ft.Event) -> None:
         campaigns = repo.list_campaigns()
@@ -252,7 +268,36 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     # 호출되지 않는다 — 드롭다운에서 골라도 편집 화면이 안 바뀌던 원인.)
     selector.on_select = on_select
 
-    initial_id = state.pending_workbench_campaign_id
+    def before_leave(proceed) -> None:
+        """다른 메뉴로 가기 전: 저장하지 않은 수정이 있으면 저장할지 묻는다."""
+        dirty = [(n, save) for n, is_dirty, save in getattr(page, "_wb_guards", []) if _safe_dirty(is_dirty)]
+        if not dirty:
+            proceed()
+            return
+
+        ask_save_before_leave(page, [n for n, _ in dirty], [lambda save=save: save(None) for _, save in dirty], proceed)
+
+    state.before_leave = before_leave
+
+    def guarded_select(e: ft.Event) -> None:
+        """글을 바꿀 때도 같은 보호(고른 값은 잠시 되돌려 두고, 결정한 뒤에 바꾼다)."""
+        target = selector.value
+        prev = state.current_campaign_id
+        if prev and prev != target and any(_safe_dirty(d) for _, d, _ in getattr(page, "_wb_guards", [])):
+            selector.value = prev
+            selector.update()
+
+            def go() -> None:
+                selector.value = target
+                selector.update()
+                load_editor(target, live=True)
+            before_leave(go)
+            return
+        on_select(e)
+
+    selector.on_select = guarded_select
+
+    initial_id = state.pending_workbench_campaign_id or state.current_campaign_id
     state.pending_workbench_campaign_id = None
     refresh_list(initial_id, live=False)
 
@@ -286,6 +331,7 @@ def _build_campaign_editor(
     refresh_sim,
     refresh_selector_label=None,
     open_studio=None,
+    state: AppState | None = None,
 ) -> ft.Control:
     campaign = repo.get_campaign(campaign_id)
     if not campaign:
@@ -670,6 +716,11 @@ def _build_campaign_editor(
         gen_status.update()
         refresh_sim()
 
+    _guard(page, "제목·메모",
+           lambda: ((title_field.value or "").strip() != (campaign.get("title") or "").strip()
+                    or (memo_field.value or "") != (campaign.get("memo") or "")),
+           on_save)
+
     # 다른 화면에 갔다 돌아오면 이 편집기는 새로 만들어지므로, "생성 중 버튼 비활성"은 화면 상태가
     # 아니라 DB의 status로 판단한다 — 그러지 않으면 같은 글에 생성이 두 번 돈다
     # (content_writer도 repo.begin_processing으로 한 번 더 막는다).
@@ -727,6 +778,8 @@ def _build_campaign_editor(
         def on_progress(msg: str) -> None:
             progress_log.append(f"⏳ {msg}")
 
+        chosen = {k for k, cb in out_checks.items() if cb.value}
+
         def _work() -> None:
             try:
                 made = outputs.run_outputs(
@@ -739,19 +792,30 @@ def _build_campaign_editor(
                 # 사라진다(이 화면을 처음 열 때의 빈 상태로). 실패했을 때는
                 # 새로 보여줄 콘텐츠도 없으니 다시 그릴 이유도 없다.
                 progress_log.append(f"❌ 실패: {exc}")
+                if state is not None and state.current_view != "워크벤치":   # 다른 메뉴에 있으면 돌아왔을 때 보이게
+                    state.notices[campaign_id] = {"text": f"❌ 만들기 실패: {exc}", "cards": False}
                 gen_status.value = "\n".join(progress_log)
                 gen_status.color = "#B3261E"
                 gen_spinner.visible = False
-                gen_spinner.update()
                 generate_button.disabled = not (memo_field.value.strip() or campaign.get("source_url"))
-                generate_button.update()
-                gen_status.update()
+                try:
+                    gen_spinner.update()
+                    generate_button.update()
+                    gen_status.update()
+                except Exception:  # noqa: BLE001 — 화면을 떠났으면 무시
+                    pass
                 return
-            gen_status.value = "✅ 만들었습니다: " + ", ".join(made["made"]) + "".join(f"\n· {n}" for n in made["notes"])
+            summary = "✅ 만들었습니다: " + ", ".join(made["made"]) + "".join(f"\n· {n}" for n in made["notes"])
+            if state is not None:   # 화면을 다시 그려도(또는 다른 메뉴에 갔다 와도) 완료 안내가 남게
+                state.notices[campaign_id] = {"text": summary, "cards": bool(chosen & {"cards", "shorts"})}
+            gen_status.value = summary
             gen_status.color = "#1B6E3C"
             gen_spinner.visible = False
-            gen_spinner.update()
-            gen_status.update()
+            try:
+                gen_spinner.update()
+                gen_status.update()
+            except Exception:  # noqa: BLE001 — 그사이 다른 메뉴로 갔으면 화면이 없다
+                pass
             # 성공 경로에서는 버튼을 다시 활성화하지 않는다(비활성 상태 그대로
             # 둔다) — 곧바로 reload()가 이 버튼 자체를 새로 만든 것으로
             # 통째로 갈아 끼우므로, 여기서 활성화했다가 아래 sleep 동안
@@ -760,15 +824,35 @@ def _build_campaign_editor(
             # 성공했을 때는 새로 생성된 콘텐츠 섹션을 보여주기 위해 화면
             # 전체를 다시 그려야 한다 — 그 전에 위 완료 메시지가 잠깐이라도
             # 눈에 보일 시간을 준다.
+            # 사용자가 그사이 다른 메뉴로 갔으면 끌고 오지 않는다(완료 안내는 워크벤치에 돌아오면 보인다).
+            on_workbench = state is None or state.current_view == "워크벤치"
+            if not on_workbench or (state is not None and state.current_campaign_id != campaign_id):
+                return
             time.sleep(0.8)
-            if open_studio and ({"cards", "shorts"} & {k for k, cb in out_checks.items() if cb.value}):
-                open_studio()    # 그림을 크게 보면서 다듬는 화면으로 넘어간다
+            if open_studio and "blog" not in chosen and chosen & {"cards", "shorts"}:
+                open_studio()    # 카드·쇼츠만 만들었으면 워크벤치에 볼 것이 없으니 그림을 크게 보는 화면으로
             else:
-                reload()
+                reload()         # 블로그를 만들었으면 여기 남아 결과(맨 위 완료 안내)를 보여 준다
 
         page.run_thread(_work)
 
-    generate_button.on_click = on_generate
+    def on_generate_guarded(e: ft.Event) -> None:
+        """이미 만든 결과가 있으면, 덮어쓰기 전에 무엇이 바뀌는지 알리고 묻는다(직접 고친 본문·카드 문구를 잃지 않게)."""
+        cur = repo.get_campaign(campaign_id) or {}
+        chosen = {k for k, cb in out_checks.items() if cb.value}
+        lost = []
+        if "blog" in chosen and (cur.get("content") or "").strip():
+            lost.append("블로그 본문(직접 고친 내용 포함)·인스타 캡션·발행 태그")
+        if chosen & {"cards", "shorts"} and cur.get("card_storyboard"):
+            lost.append("카드 문구(다듬은 내용 포함)·쇼츠 대본")
+        if not lost:
+            on_generate(e)
+            return
+        confirm(page, "다시 만들까요?", "이미 만든 아래 내용이 새로 만든 것으로 바뀝니다.\n· " + "\n· ".join(lost)
+                + "\n\n일부만 다시 만들려면 '이번에 만들 것'에서 체크를 조정하세요.",
+                lambda: on_generate(e), ok_label="다시 만들기")
+
+    generate_button.on_click = on_generate_guarded
     budget_warning = repo.budget_message()
     if budget_warning:
         controls.append(_status_box(budget_warning, scale, "warning"))
@@ -789,21 +873,35 @@ def _build_campaign_editor(
     # --- 생성된 콘텐츠 -----------------------------------------------------------
     split = len(controls)       # 여기까지가 '입력·설정', 이 아래가 '결과'
     studio_row = ft.Row([
-        ft.FilledButton("🃏 카드·쇼츠 만들기 / 보기", on_click=lambda e: open_studio() if open_studio else None),
-        ft.Text("카드뉴스·쇼츠는 그림을 크게 보면서 만드는 별도 화면에서 합니다.", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+        ft.FilledButton("🃏 카드·쇼츠 열기", on_click=lambda e: open_studio() if open_studio else None),
+        ft.Text("카드뉴스·쇼츠는 왼쪽 메뉴의 🃏 카드·쇼츠 화면에서 그림을 크게 보며 만듭니다.", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
     ], spacing=10, wrap=True)
     if campaign.get("content"):
         controls.append(ft.Divider())
         controls.append(ft.Text("✏️ 생성된 콘텐츠", weight=ft.FontWeight.BOLD, size=fs(14, scale)))
+        controls += _publish_check_box(campaign, scale)
         controls.append(_build_channel_tabs(page, campaign, title_field, scale, reload, refresh_sim))
         controls += _build_format_section(page, campaign, scale, reload, refresh_sim, strength_group)
 
         controls.append(ft.Divider())
 
-        def on_queue(e: ft.Event) -> None:
+        def do_queue() -> None:
             repo.update_campaign(campaign_id, status="ready_to_publish")
             queue_status.value = "🚀 게시 대기열에 넣었습니다. [네이버 게시] 화면에서 진행하세요."
             queue_status.update()
+
+        def on_queue(e: ft.Event) -> None:
+            warn = [t for lv, t in publish_checks(repo.get_campaign(campaign_id) or campaign) if lv == "warn"]
+            if not warn:
+                do_queue()
+                return
+            confirm(page, "확인할 것이 남아 있습니다", "· " + "\n· ".join(warn) + "\n\n그래도 게시 대기열에 넣을까요?",
+                    do_queue, ok_label="그래도 넣기", danger=False)
+
+        def on_regenerate_guarded(e: ft.Event) -> None:
+            confirm(page, "블로그만 다시 만들까요?",
+                    "지금 본문(직접 고친 내용 포함)·인스타 캡션·발행 태그가 새로 만든 것으로 바뀝니다. 카드·쇼츠는 그대로입니다.",
+                    lambda: on_regenerate(e), ok_label="다시 만들기")
 
         def on_regenerate(e: ft.Event) -> None:
             # on_generate와 같은 이유로 별도 스레드에서 돌린다 — 그러지 않으면
@@ -851,7 +949,7 @@ def _build_campaign_editor(
         queue_status = ft.Text("", size=fs(12, scale), color="#1B6E3C")
         queue_spinner = ft.ProgressRing(width=16, height=16, stroke_width=2, visible=False)
         regenerate_button = ft.OutlinedButton(
-            "🔁 초안 다시 생성", on_click=on_regenerate, expand=True, disabled=is_processing
+            "🔁 블로그만 다시 만들기", on_click=on_regenerate_guarded, expand=True, disabled=is_processing
         )
         controls += [
             ft.Row([
@@ -912,6 +1010,17 @@ def _build_campaign_editor(
 
         controls += _build_report_controls(campaign, scale)
 
+    # 방금 끝난 생성의 완료 안내(만든 것·주의 사항) — 다시 그려도 한 번은 맨 위에 보이게 하고, 보여 준 뒤 지운다.
+    notice = (state.notices.pop(campaign_id, None) if state is not None else None)
+    notice_box: list[ft.Control] = []
+    if notice:
+        failed = notice["text"].startswith("❌")
+        row = [ft.Text(notice["text"], size=fs(12, scale), color="#B3261E" if failed else "#1B6E3C", expand=True)]
+        if notice.get("cards") and open_studio and not failed:
+            row.append(ft.FilledButton("🃏 카드·쇼츠에서 보기", on_click=lambda e: open_studio()))
+        notice_box = [ft.Container(content=ft.Row(row, spacing=12, vertical_alignment=ft.CrossAxisAlignment.START),
+                                   bgcolor="#FDECEA" if failed else "#E8F3EC", padding=12, border_radius=8)]
+
     if campaign.get("content"):
         # 글을 다 쓴 뒤에는 결과를 맨 위에 보여 주고, 메모·설정·다시 만들기는 접어 둔다(스크롤로 내려가지 않게).
         controls = (controls[:1]
@@ -920,6 +1029,7 @@ def _build_campaign_editor(
                     + [studio_row] + controls[split:])
     else:
         controls = controls[:split] + [studio_row] + controls[split:]
+    controls = notice_box + controls
     return ft.Column(controls, spacing=10, scroll=ft.ScrollMode.AUTO, expand=True)
 
 
@@ -942,8 +1052,9 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
 
     # --- 네이버 본문 --------------------------------------------------------
     body_field = ft.TextField(
-        label="본문 ([IMAGE: 경로] 위치를 옮기면 사진 배치가 바뀝니다 · **굵게** ==형광== ## 소제목 > 인용 --- 구분선을 직접 써도 됩니다)",
-        value=campaign.get("content") or "", multiline=True, min_lines=14, max_lines=24, expand=True,
+        label="본문",
+        helper="[IMAGE: 경로] 줄을 옮기면 사진 위치가 바뀝니다 · **굵게** ==형광== ## 소제목 > 인용 --- 구분선을 직접 써도 됩니다",
+        value=campaign.get("content") or "", multiline=True, min_lines=10, max_lines=16, expand=True,
     )
     naver_tags_field = ft.TextField(label="발행 태그", value=" ".join(campaign.get("naver_hashtags") or []), expand=True)
     naver_status = ft.Text("", size=fs(12, scale), color="#1B6E3C")
@@ -972,6 +1083,11 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
         naver_status.value = "저장했습니다."
         naver_status.update()
         refresh_sim()
+
+    _guard(page, "블로그 본문·태그",
+           lambda: ((body_field.value or "").strip() != (campaign.get("content") or "").strip()
+                    or naver_tags_field.value.split() != list(campaign.get("naver_hashtags") or [])),
+           on_save_naver)
 
     revise_field = ft.TextField(
         label="수정 요청", hint_text="예: 도입부를 더 친근한 말투로 바꾸고, 가격 이야기는 빼주세요.",
@@ -1111,6 +1227,11 @@ def _build_channel_tabs(page: ft.Page, campaign: dict, title_field: ft.TextField
         ig_status.value = "저장했습니다."
         ig_status.update()
         refresh_sim()
+
+    _guard(page, "인스타 캡션",
+           lambda: ((ig_caption_field.value or "") != (campaign.get("instagram_caption") or "")
+                    or ig_tags_field.value.split() != list(campaign.get("instagram_hashtags") or [])),
+           on_save_ig)
 
     ig_tab = ft.Column(
         [
@@ -1290,6 +1411,53 @@ def _build_format_section(page: ft.Page, campaign: dict, scale: float, reload, r
         spacing=6,
     )
     return [ft.Divider()] + collapsible(head, body, initially_open=not items)
+
+
+def publish_checks(campaign: dict) -> list[tuple[str, str]]:
+    """게시 전에 사람이 확인해야 할 것을 한곳에 모은다. [(수준 'warn'|'info', 문구)].
+    warn이 있으면 게시 대기열에 넣을 때 한 번 더 묻는다."""
+    from ai_workers import consent
+    report = campaign.get("guardrail_report") or {}
+    out: list[tuple[str, str]] = []
+    if not (campaign.get("content") or "").strip():
+        return out
+    passed = report.get("compliance_pass")
+    if passed is False:
+        n = len(report.get("llm_issues") or [])
+        out.append(("warn", f"상담 윤리·표현 검수를 통과하지 못했습니다 (점수 {report.get('score', '-')}/100"
+                            + (f", 지적 {n}건" if n else "") + ") — 아래 검수 결과를 보고 본문을 고치세요."))
+    elif passed is None:
+        out.append(("warn", "검수(가드레일)를 건너뛰고 만든 글입니다 — 치료·효과 보장·낙인 표현이 없는지 직접 확인하세요."))
+    for key, sheet in (("notice", factsheet.NOTICE), ("product", factsheet.PRODUCT)):
+        sec = report.get(key) or {}
+        if sec.get("checked") and sec.get("missing_labels"):
+            out.append(("warn", f"{sheet.title}에 넣은 {', '.join(sec['missing_labels'])}이(가) 본문에 없습니다."))
+    for ch, label in (("instagram", "인스타 캡션"),):
+        comp = (report.get("sns_compliance") or {}).get(ch) or {}
+        if comp.get("checked") and comp.get("compliance_pass") is False:
+            out.append(("warn", f"{label} 검수 미해결 — " + " / ".join(comp.get("issues") or [])))
+    if report.get("sns_stale"):
+        out.append(("warn", "본문을 고친 뒤 인스타 캡션을 다시 만들지 않았습니다(예전 본문 기준)."))
+    if consent.required(campaign) and consent.missing(campaign):
+        out.append(("info", "현장 후기 + 사진 — 네이버 게시 화면에서 동의 확인 3항목을 체크해야 게시됩니다."))
+    if report.get("photo_people"):
+        out.append(("info", f"사람이 보이는 사진 {report['photo_people']}장 — 얼굴·동의를 확인하세요."))
+    for rel in (report.get("related_posts") or [])[:2]:
+        out.append(("info", f"비슷한 기존 글: {rel['title']} ({rel['date']})"))
+    return out
+
+
+def _publish_check_box(campaign: dict, scale: float) -> list[ft.Control]:
+    checks = publish_checks(campaign)
+    if not checks:
+        return [_status_box("✅ 게시 전 확인: 검수 통과 · 누락된 정보 없음", scale, "info")]
+    warn = [t for lv, t in checks if lv == "warn"]
+    lines = [ft.Text(("⚠️ " if lv == "warn" else "• ") + t, size=fs(12, scale),
+                     color="#8A3B12" if lv == "warn" else BRAND_COLORS["text_muted"]) for lv, t in checks]
+    head = ft.Text(f"게시 전 확인 — 고칠 것 {len(warn)}건" if warn else "게시 전 확인 — 참고",
+                   weight=ft.FontWeight.BOLD, size=fs(13, scale))
+    return [ft.Container(content=ft.Column([head, *lines], spacing=4), bgcolor="#FFF6E5" if warn else "#F2F4F1",
+                         padding=12, border_radius=8)]
 
 
 def cost_summary_text(cost: dict | None) -> str | None:

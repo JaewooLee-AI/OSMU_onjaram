@@ -107,6 +107,8 @@ create table if not exists app_settings (
     -- 네이버 키워드 측정(검색량·경쟁도 API) 사용 여부. 꺼 두면(기본) API를 한 번도 부르지 않고, 글 생성은 킷의
     -- 시드 키워드와 이전에 측정해 둔 값만 씁니다. 측정은 선택 기능입니다(설계안 §8).
     naver_keywords_enabled    integer not null default 0,
+    -- 카드 디자인 목록에 '(이전)' 디자인도 보일지(기본 꺼짐 — 온자람 디자인만). 이미 그 디자인으로 만든 글은 꺼져 있어도 그대로 그린다.
+    show_legacy_designs       integer not null default 0,
     updated_at                text not null default (datetime('now'))
 );
 
@@ -464,6 +466,7 @@ _ADDED_COLUMNS = {
     },
     "app_settings": {
         "naver_keywords_enabled": "integer not null default 0",
+        "show_legacy_designs": "integer not null default 0",
     },
     "company_profile": {
         "phone": "text",

@@ -15,8 +15,9 @@ from core import repo, setup_check, storage
 
 from flet_app.components.collapsible import collapsible
 from flet_app.views import blog_panel
+from flet_app.dialogs import confirm_delete_campaign
 from flet_app.state import AppState
-from flet_app.theme import BRAND_COLORS, fs, stat_card, status_chip
+from flet_app.theme import BRAND_COLORS, display_title, fs, stat_card, status_chip
 
 BOARD_COLUMNS = [
     ("awaiting_media", "소재 대기"),
@@ -57,7 +58,7 @@ def _setup_panel(scale: float) -> ft.Control:
 
 def _job_card(job: dict, scale: float, on_open, on_work=None, on_studio=None) -> ft.Control:
     icon = "📰" if job.get("source_type") == "news" else "✍️"
-    title = job.get("title") or job.get("source_url") or job["id"][:8]
+    title = display_title(job, 60)
     photos = len(job.get("storage_file_paths") or [])
     published = job.get("status") == "published"
     meta = f"{job.get('created_at', '')} · 사진 {photos}장"
@@ -76,7 +77,7 @@ def _job_card(job: dict, scale: float, on_open, on_work=None, on_studio=None) ->
         links = [ft.Row([
             ft.TextButton("✍️ 작업 열기", on_click=lambda e, j=job: on_work(j), style=ft.ButtonStyle(padding=ft.Padding(4, 0, 4, 0))),
             ft.TextButton("🃏 카드·쇼츠", on_click=lambda e, j=job: on_studio(j), style=ft.ButtonStyle(padding=ft.Padding(4, 0, 4, 0))),
-        ], spacing=0)]
+        ], spacing=0, wrap=True)]   # 창이 좁으면 두 줄로(오른쪽이 잘리지 않게)
 
     return ft.Container(
         content=ft.Column([
@@ -140,13 +141,12 @@ def _build_failed_section(campaigns: list[dict], scale: float, refresh) -> list[
             repo.update_campaign(job_id, status="awaiting_media", publish_error=None)
             refresh(True)
 
-        def on_delete(e: ft.Event, job_id: str = job_id) -> None:
-            repo.delete_campaign(job_id)
-            refresh(True)
+        def on_delete(e: ft.Event, job: dict = job) -> None:
+            confirm_delete_campaign(e.control.page, job, lambda: refresh(True))
 
         out.append(ft.Container(
             content=ft.Column([
-                ft.Text(job.get("title") or job.get("source_url") or job["id"][:8], weight=ft.FontWeight.BOLD, size=fs(13, scale)),
+                ft.Text(display_title(job, 60), weight=ft.FontWeight.BOLD, size=fs(13, scale)),
                 ft.Text(job.get("publish_error") or "원인 미기록", size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
                 ft.Row([
                     ft.OutlinedButton("🔁 다시 시도", on_click=on_retry),
@@ -174,11 +174,13 @@ def _build_reset_section(page: ft.Page, scale: float, campaigns: list[dict], fil
         def on_confirm(e: ft.Event) -> None:
             removed = repo.reset_generated_content()
             files_removed = storage.clear_all()
+            from core import library
+            exports_freed = library.clear_exports()
             confirm["value"] = False
             refresh(True)
             page.show_dialog(ft.SnackBar(ft.Text(
-                f"초기화했습니다 — 캠페인 {removed['campaigns']}건, 사진 {files_removed}장, "
-                f"제목 이력 {removed['titles']}건 삭제됨."
+                f"초기화했습니다 — 글 {removed['campaigns']}건, 사진 {files_removed}장, "
+                f"카드·쇼츠 파일 {exports_freed / 1_048_576:.1f}MB, 제목 이력 {removed['titles']}건 삭제됨."
             )))
 
         def on_cancel(e: ft.Event) -> None:
@@ -189,7 +191,7 @@ def _build_reset_section(page: ft.Page, scale: float, campaigns: list[dict], fil
         return ft.Column([
             ft.Container(
                 content=ft.Text(
-                    "정말 삭제할까요? 되돌릴 수 없습니다. 위에 적힌 캠페인·사진·제목 이력이 전부 사라집니다.",
+                    "정말 삭제할까요? 되돌릴 수 없습니다. 위에 적힌 글·사진·카드·쇼츠 파일·제목 이력이 전부 사라집니다.",
                     size=fs(12, scale), color="#8A6D3B",
                 ),
                 bgcolor="#FFF6E5", padding=10, border_radius=8,
@@ -204,14 +206,15 @@ def _build_reset_section(page: ft.Page, scale: float, campaigns: list[dict], fil
 
     body = ft.Column([
         ft.Text(
-            "워크벤치·뉴스 큐레이션·네이버 게시로 만들어진 것만 지웁니다 — 캠페인(초안·인스타/X/쇼츠·"
-            "컴플라이언스 리포트), 업로드한 사진, 제목 반복 방지 이력. 브랜드 킷, API 키, LLM 설정, "
-            "키워드·이미지 분석 캐시는 그대로 남습니다.",
+            "앱에서 만든 작업 내용만 지웁니다 — 글(블로그 본문·인스타 캡션·검수 결과·카드 문구·쇼츠 대본), 올린 사진, "
+            "카드 그림·AI 이미지·쇼츠 영상 파일, 제목 반복 방지 이력. 브랜드 킷, API 키, 모델·단가 설정, "
+            "카드 종류·디자인, 키워드·이미지 분석 캐시는 그대로 남습니다.",
             size=fs(11, scale), color=BRAND_COLORS["text_muted"],
         ),
         ft.Text(
-            f"- 캠페인 {len(campaigns)}건\n"
+            f"- 글 {len(campaigns)}건\n"
             f"- 업로드 사진 {file_count}장 ({total_bytes / 1_048_576:.1f}MB)\n"
+            f"- 카드·쇼츠 파일 {_exports_mb():.1f}MB\n"
             f"- 제목 이력 {repo.title_history_count()}건",
             size=fs(11, scale),
         ),
@@ -221,6 +224,14 @@ def _build_reset_section(page: ft.Page, scale: float, campaigns: list[dict], fil
     return [ft.Divider()] + collapsible("⚠️ 콘텐츠 초기화", body)
 
 
+def _exports_mb() -> float:
+    try:
+        from core import library
+        return library.exports_usage() / 1_048_576
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 def _won(value: float) -> str:
     return f"{value:,.0f}원"
 
@@ -228,19 +239,13 @@ def _won(value: float) -> str:
 def _build_body(page: ft.Page, scale: float, refresh, state: AppState, view: dict) -> ft.Control:
     campaigns = repo.list_campaigns()
     counts = repo.campaign_status_counts()
-    usage = repo.usage_totals()
     month = repo.cost_this_month()
     file_count, total_bytes = storage.storage_usage()
 
     active = counts.get("awaiting_media", 0) + counts.get("queued", 0) + counts.get("processing", 0)
     drafts = counts.get("draft", 0)
     published = counts.get("published", 0)
-    saved = usage["saved_tokens"]
-    spent = usage["input_tokens"] + usage["output_tokens"]
-    ratio = f"절감률 {saved / (saved + spent) * 100:.0f}%" if (saved + spent) else "아직 호출 없음"
-    saved_money = repo.cost_all_time()["saved_cost_krw"]
-    if saved_money:
-        ratio += f" · 약 {_won(saved_money)} 절감(추정)"
+    waiting = counts.get("ready_to_publish", 0)
 
     def on_refresh(e: ft.Event) -> None:
         refresh(True)
@@ -271,7 +276,7 @@ def _build_body(page: ft.Page, scale: float, refresh, state: AppState, view: dic
     controls: list[ft.Control] = [
         ft.Text("파이프라인 대시보드", size=fs(24, scale), weight=ft.FontWeight.BOLD),
         ft.Text(
-            "소재 수집 → 초안 생성 → 게시까지의 진행 상황과, 이번까지 절약된 토큰을 한눈에 봅니다. "
+            "메모 → 초안 → 게시까지의 진행 상황과 이번 달 AI 비용을 한눈에 봅니다(토큰 절감 내역은 설정 → 사용량). "
             "카드를 누르면 그 상태의 글만, 글을 누르면 워크벤치에서 그 글이 열립니다.",
             size=fs(12, scale), color=BRAND_COLORS["text_muted"],
         ),
@@ -291,7 +296,7 @@ def _build_body(page: ft.Page, scale: float, refresh, state: AppState, view: dic
             _clickable_card(stat_card("초안 완료", str(drafts), "검수 후 게시 가능", scale), "draft", active_filter, on_filter),
             _clickable_card(stat_card("게시 완료", str(published), f"사진 {file_count}장 · {total_bytes / 1_048_576:.1f}MB", scale),
                             "published", active_filter, on_filter),
-            ft.Container(content=stat_card("절약된 토큰", f"{saved:,}", ratio, scale), expand=True),
+            ft.Container(content=stat_card("게시 대기", str(waiting), "네이버 게시 화면에서 진행", scale), expand=True),
             ft.Container(content=stat_card("이번 달 AI 비용(추정)", _won(month["cost_krw"]), cost_note, scale), expand=True),
         ], spacing=12),
     ]

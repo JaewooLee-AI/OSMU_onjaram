@@ -18,7 +18,7 @@ from cards import card_types, design_templates, images, source_check
 from cards.brand import BrandKit, from_db
 from cards.schema import BrandElements, CardSlide, EditableStoryboard, MediaAsset
 from core import repo
-from core.brand_seed import SLOGAN_MAIN, SLOGAN_SUB
+from core.brand_seed import SLOGAN_SUB
 
 _NUM_RE = re.compile(r"\d[\d,.]*")
 _TEXT_FIELDS = ("lead_headline", "body_content", "takeaway", "stat_label", "badge")

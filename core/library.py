@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 import shutil
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -81,3 +82,24 @@ def total_usage() -> Dict[str, int]:
         for k, v in disk_usage(c).items():
             total[k] += v
     return total
+
+
+def _exports_dirs() -> List[str]:
+    from cards.paths import EXPORTS_DIR
+    return [os.path.join(EXPORTS_DIR, sub) for sub in ("cards", "shorts")]
+
+
+def exports_usage() -> int:
+    """카드 그림·AI 이미지·쇼츠 영상 폴더(exports/cards, exports/shorts)의 전체 크기."""
+    return sum(_size(d) for d in _exports_dirs() if os.path.exists(d))
+
+
+def clear_exports() -> int:
+    """콘텐츠 초기화용: exports/cards·exports/shorts를 통째로 지운다(글이 모두 지워진 뒤라 가리키는 글이 없음). 지운 바이트 수."""
+    freed = 0
+    for d in _exports_dirs():
+        if os.path.exists(d):
+            freed += _size(d)
+            shutil.rmtree(d, ignore_errors=True)
+    return freed
+

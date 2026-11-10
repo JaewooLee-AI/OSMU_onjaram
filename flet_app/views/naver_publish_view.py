@@ -31,8 +31,9 @@ from core import repo
 
 from flet_app.components.collapsible import collapsible
 from flet_app.kit_picker import kit_label
+from flet_app.dialogs import confirm_delete_campaign
 from flet_app.state import AppState
-from flet_app.theme import BRAND_COLORS, fs
+from flet_app.theme import BRAND_COLORS, display_title, fs
 from flet_app.views.workbench_view import _copy_field
 
 
@@ -257,7 +258,7 @@ def _build_card(
         if allow_manual_complete:
             url_field = ft.TextField(
                 label="네이버 글 주소 (선택)", hint_text="https://blog.naver.com/아이디/글번호", dense=True, expand=True,
-                tooltip="발행한 글의 주소를 붙여 넣으면 대시보드·캘린더에서 바로 열 수 있습니다.",
+                tooltip="발행한 글의 주소를 붙여 넣으면 대시보드·보관함에서 바로 열 수 있습니다.",
             )
 
             def on_manual(e: ft.Event) -> None:
@@ -273,9 +274,7 @@ def _build_card(
             extra.append(url_field)
 
         def on_ask_delete(e: ft.Event) -> None:
-            confirm_delete["value"] = True
-            action_box.content = build_actions()
-            action_box.update()
+            confirm_delete_campaign(page, repo.get_campaign(campaign_id) or campaign, refresh_all)
 
         buttons.append(ft.OutlinedButton("🗑️ 삭제", on_click=on_ask_delete, expand=True))
 
@@ -285,7 +284,7 @@ def _build_card(
 
     icon = "📰" if campaign["source_type"] == "news" else "✍️"
     card_children: list[ft.Control] = [
-        ft.Text(f"{icon} {campaign.get('title') or '(제목 없음)'}", size=fs(15, scale), weight=ft.FontWeight.BOLD),
+        ft.Text(f"{icon} {display_title(campaign, 80)}", size=fs(15, scale), weight=ft.FontWeight.BOLD),
     ]
     if key_prefix == "pending":
         photo_count = len(campaign.get("storage_file_paths") or [])

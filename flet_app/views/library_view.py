@@ -15,8 +15,9 @@ import flet as ft
 from core import library, repo
 
 from flet_app.image_src import b64_src
+from flet_app.dialogs import confirm_delete_campaign
 from flet_app.state import AppState
-from flet_app.theme import BRAND_COLORS, fs, status_chip
+from flet_app.theme import BRAND_COLORS, display_title, fs, status_chip
 
 PAGE_SIZE = 20
 _STATUS_OPTIONS = {"": "상태 전체", "active": "작업 중", "draft": "초안 완료", "published": "게시 완료", "failed": "실패"}
@@ -103,16 +104,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             actions=[ft.TextButton("취소", on_click=lambda e: page.pop_dialog()), ft.FilledButton("정리하기", on_click=ok)]))
 
     def delete_dialog(c: dict) -> None:
-        def ok(e: ft.Event) -> None:
-            page.pop_dialog()
-            repo.delete_campaign(c["id"])
-            reload("🗑️ 삭제했습니다.")
-
-        page.show_dialog(ft.AlertDialog(
-            modal=True, title=ft.Text("이 글을 삭제할까요?"),
-            content=ft.Text(f"「{(c.get('title') or '(제목 없음)')[:40]}」을(를) 삭제하면 되돌릴 수 없습니다. 보관만 하려면 [보관]을 쓰세요."),
-            actions=[ft.TextButton("취소", on_click=lambda e: page.pop_dialog()),
-                     ft.FilledButton("삭제", on_click=ok, style=ft.ButtonStyle(bgcolor="#B3261E"))]))
+        confirm_delete_campaign(page, c, lambda: reload("🗑️ 처리했습니다."))
 
     def bulk_archive(e: ft.Event) -> None:
         old = library.published_older_than(30)
@@ -148,7 +140,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         sb = c.get("card_storyboard") or {}
         n_cards = len(sb.get("card_slides") or [])
         has_video = bool(c.get("shorts_video_path")) and os.path.exists(c["shorts_video_path"])
-        title = c.get("title") or c.get("source_title") or (c.get("memo") or "")[:30] or "(제목 없음)"
+        title = display_title(c, 60)
         meta = f"{(c.get('created_at') or '')[:16]}" + (f" · 🧵 {c['brand_kit_name']}" if c.get("brand_kit_name") else "")
         if c.get("published_at"):
             meta += f" · 게시 {c['published_at'][:10]}"

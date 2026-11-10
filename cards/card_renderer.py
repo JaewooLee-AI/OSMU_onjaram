@@ -3,7 +3,6 @@
 브랜드 표시(로고·색·소개·연락처·QR)는 스토리보드의 brand_id 브랜드 킷과 콘텐츠별 brand_elements 선택을 따른다.
 레이아웃: 표지·본문·번호형·빅넘버·비교표·마무리(CTA)·1장 카드, 사진이 있으면 전면/상단 사진 레이아웃.
 """
-import io
 import re
 import logging
 import os
@@ -22,6 +21,7 @@ from cards.fonts import wrap_text_balanced
 from cards.layout_onjaram import OnjaramLayoutMixin
 from cards.layout_tri import TriLayoutMixin
 from cards.layout_editorial import EditorialLayoutMixin
+from cards.layout_report import ReportLayoutMixin
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +72,7 @@ def make_qr(elements: BrandElements) -> Optional[Image.Image]:
     return None
 
 
-class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayoutMixin):
+class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayoutMixin, ReportLayoutMixin):
     """고해상도 카드뉴스 (1080x1350) 자동 렌더링 서비스"""
 
     WIDTH = 1080
@@ -136,7 +136,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
         design = design_templates.get(storyboard.design_id)
         if self.FOLLOW_ASPECT:       # 카드 크기: 3단 디자인만 높이를 바꾼다(쇼츠가 자기 높이로 그릴 때는 따르지 않는다)
             from cards.schema import CARD_ASPECTS
-            self.HEIGHT = CARD_ASPECTS.get(getattr(storyboard, "aspect", "4:5"), 1350) if design.layout in ("tri", "oj", "ed") else 1350
+            self.HEIGHT = CARD_ASPECTS.get(getattr(storyboard, "aspect", "4:5"), 1350) if design.layout in ("tri", "oj", "ed", "rp") else 1350
         ctx = _Ctx(kit, storyboard.brand_elements, index, total, slide, design)
         img = await asyncio.to_thread(self._draw, ctx, photo)
         img.save(out_path, "PNG")
@@ -184,7 +184,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
     def _draw(self, ctx: "_Ctx", photo: Optional[Image.Image]) -> Image.Image:
         """카드 한 장 그리기. 디자인 템플릿의 제목·본문 글꼴을 이 그리기 동안만 적용"""
         token = use_fonts(ctx.design.heading_font, ctx.design.body_font)
-        scale_token = None if ctx.design.layout in ("tri", "oj", "ed") else use_text_scale(ctx.title_scale, ctx.body_scale)
+        scale_token = None if ctx.design.layout in ("tri", "oj", "ed", "rp") else use_text_scale(ctx.title_scale, ctx.body_scale)
         legible_token = use_legible(True)
         try:
             clean, terms = emphasis.parse(ctx.slide.lead_headline)   # *강조어* → 별표 지우고 강조어 기억
@@ -225,6 +225,8 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             return self._layout_oj(ctx, photo)
         if ctx.design.layout == "ed":
             return self._layout_ed(ctx, photo)
+        if ctx.design.layout == "rp":
+            return self._layout_rp(ctx, photo)
         if t in self._ALIASES and ctx.design.layout != "tri":
             ctx = _Ctx(ctx.kit, ctx.el, ctx.index, ctx.total,
                        ctx.slide.model_copy(update={"slide_type": self._ALIASES[t]}), ctx.design)
@@ -687,7 +689,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
                     ty += lh
 
     def _layout_gov(self, ctx: "_Ctx", photo: Optional[Image.Image]) -> Image.Image:
-        W, H, M = self.WIDTH, self.HEIGHT, self.MARGIN
+        W, H = self.WIDTH, self.HEIGHT
         c, t = ctx.c, ctx.slide.slide_type
         img = Image.new("RGB", (W, H), c.background)
         draw = ImageDraw.Draw(img)
@@ -940,7 +942,6 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             draw.text((W // 2, y + 32), sub[:34], font=f_s, fill=c.primary, anchor="mm")
             y += 64
         top = max(y + 50, 640)
-        box = (0, top, W, H)
         if photo is not None:
             img.paste(self._cover_fit(photo, W, H - top), (0, top))
         else:

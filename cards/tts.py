@@ -73,7 +73,7 @@ class GeminiTTS:
     def __init__(self, voice: str, cache_dir: str, call=None):
         model = repo.resolve_slot_model("tts")
         if model is None:
-            raise TtsUnavailable("'음성 내레이션' 모델이 지정되지 않았습니다(⚙️ 설정 → 🤖 모델 등록).")
+            raise TtsUnavailable("'음성 내레이션' 모델이 지정되지 않았습니다(⚙️ 설정 → 🤖 AI 연결·모델).")
         if model["vendor"] != "google":
             raise TtsUnavailable(f"음성 합성은 현재 Google(Gemini) 모델만 지원합니다(지정된 모델: {model['vendor']}).")
         self.model = model
@@ -93,7 +93,7 @@ class GeminiTTS:
         if self._client is None:
             setting = repo.get_llm_setting("google")
             if not setting or not setting.get("is_active"):
-                raise TtsUnavailable("Gemini API 키가 없습니다(⚙️ 설정 → 🔑 LLM 벤더).")
+                raise TtsUnavailable("Gemini API 키가 없습니다(⚙️ 설정 → 🤖 AI 연결·모델).")
             from google import genai
             self._client = genai.Client(api_key=decrypt_api_key(setting["encrypted_api_key"]))
         return self._client

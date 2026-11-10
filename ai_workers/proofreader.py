@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from ai_workers.multi_llm_router import generate_text
 

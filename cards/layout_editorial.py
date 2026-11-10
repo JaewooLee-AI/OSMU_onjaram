@@ -131,6 +131,7 @@ class EditorialLayoutMixin:
 
     def _ed_photo(self, img: Image.Image, photo: Image.Image, box, radius: int = 32) -> None:
         x0, y0, x1, y1 = box
+        self._ed_note(photo={"box": tuple(int(v) for v in box), "radius": radius})
         fitted = self._cover_fit(photo, x1 - x0, y1 - y0)
         mask = Image.new("L", fitted.size, 0)
         ImageDraw.Draw(mask).rounded_rectangle([0, 0, fitted.width - 1, fitted.height - 1], radius=radius, fill=255)
@@ -206,6 +207,7 @@ class EditorialLayoutMixin:
             size -= 2
         lh = int(text_height(font) * 1.3)
         for i, it in enumerate(items):
+            self._ed_note(row=(int(x0), int(y), int(x1), int(y + row_h)))
             draw.rounded_rectangle([x0, y, x1, y + row_h], radius=22, fill=k["panel"], outline=k["line"], width=2)
             cx, cy = x0 + 28, y + row_h // 2
             if mode == "check":
@@ -238,6 +240,7 @@ class EditorialLayoutMixin:
         row_h = min(int(150 * self._ed_fs), ((y1 - y0) - gap * (n - 1)) // n)
         y = y0 + max(0, ((y1 - y0) - (row_h * n + gap * (n - 1))) // 2)
         for label, value in rows:
+            self._ed_note(row=(int(x0), int(y), int(x1), int(y + row_h)))
             draw.rounded_rectangle([x0, y, x1, y + row_h], radius=20, fill=k["panel"], outline=k["line"], width=2)
             cy = y + row_h // 2
             vx = x0 + 30
@@ -258,6 +261,18 @@ class EditorialLayoutMixin:
                 ly += lh
             y += row_h + gap
 
+    # --- 쇼츠가 쓰는 칸 위치 -----------------------------------------------------
+    def _ed_note(self, photo=None, row=None) -> None:
+        """마지막으로 그린 카드의 칸 위치를 `ed_regions`에 남긴다. 쇼츠가 사진 칸만 움직이고(영상·이미지 두 장으로 바꿔 끼우기 포함)
+        목록 칸을 하나씩 나타내는 데 쓴다. 카드 그림에는 영향이 없다."""
+        reg = getattr(self, "ed_regions", None)
+        if reg is None:
+            return
+        if photo is not None:
+            reg["photo"] = photo
+        if row is not None:
+            reg["rows"].append(row)
+
     # --- 본체 ----------------------------------------------------------------
     def _layout_ed(self, ctx, photo: Optional[Image.Image]) -> Image.Image:
         from cards.card_renderer import normalize_table
@@ -267,6 +282,8 @@ class EditorialLayoutMixin:
         # 세로로 긴 화면(3:4·9:16 쇼츠)에서는 늘어난 높이만큼 글자·칸·사진을 키운다(4:5 기준 1.0, 최대 1.25배)
         self._ed_fs = max(1.0, min(1.25, Hc / 1350))
         k = self._ed_colors(ctx)
+        self.ed_regions = {"photo": None, "rows": [], "bg": k["bg"], "ink": k["ink"], "solid": k["solid"],
+                           "accent": k["accent"], "dark": k["dark"], "pad": self.ED_PAD}
         img = Image.new("RGB", (W, H), k["bg"])
         draw = ImageDraw.Draw(img)
         t = ctx.slide.slide_type

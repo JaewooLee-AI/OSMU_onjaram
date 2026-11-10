@@ -23,6 +23,7 @@ from core import repo
 from core.brand_seed import KIT_PRESETS
 
 from flet_app.components.editable_table import ColumnSpec, EditableTable
+from flet_app.dialogs import ask_save_before_leave, confirm
 from flet_app.state import AppState
 from flet_app.theme import BRAND_COLORS, fs, palette_row
 
@@ -133,8 +134,13 @@ def _archive_dialog(page: ft.Page, kit: dict, others: list[dict], on_done) -> No
 def _build_kit_list(page: ft.Page, state: AppState, render, scale: float, kits: list[dict],
                     archived: list[dict], kit_id: int) -> ft.Control:
     def select(target: int) -> None:
-        state.editing_brand_kit_id = target
-        render()
+        def go() -> None:
+            state.editing_brand_kit_id = target
+            render()
+        if state.before_leave:   # 다른 킷으로 바꾸기 전에도 저장 안 한 수정을 묻는다
+            state.before_leave(go)
+        else:
+            go()
 
     def on_new(e: ft.Event) -> None:
         base = kits[0]
@@ -551,8 +557,46 @@ def _build_screen(page: ft.Page, state: AppState, render) -> ft.Control:
         common_status.value = f"✅ 회사 공통 값을 저장했습니다. (금기어 {len(new_blacklist)}) 모든 킷에 적용됩니다."
         page.update()
 
-    save_button = ft.FilledButton(f"'{kit_name}' 킷 저장", icon=ft.Icons.SAVE, on_click=on_save)
-    common_save_button = ft.FilledButton("회사 공통 저장", icon=ft.Icons.SAVE, on_click=on_save_common)
+    # --- 저장 안 한 수정 보호: 화면을 연 순간의 값과 비교해, 메뉴·킷을 바꿀 때 저장할지 묻는다 -------------
+    def _kit_snapshot():
+        return (industry.value, persona.value, tone_and_manner.value, core_facts_field.value, few_shot_field.value,
+                mode_dropdown.value, design_template.value, design_strength.value,
+                repr(terminology_table.get_rows()), repr(keywords_table.get_rows()))
+
+    def _common_snapshot():
+        return (brand_name.value, sub_brand.value, homepage.value, phone.value, email.value, address.value,
+                naver_blog_id.value, instagram_handle.value, guardrail_enabled.value, repr(blacklist_table.get_rows()))
+
+    base = {"kit": _kit_snapshot(), "common": _common_snapshot()}
+
+    def save_kit(e=None) -> None:
+        on_save(e)
+        base["kit"] = _kit_snapshot()
+
+    def save_common(e=None) -> None:
+        on_save_common(e)
+        base["common"] = _common_snapshot()
+
+    def before_leave(proceed) -> None:
+        names, saves = [], []
+        try:
+            if _kit_snapshot() != base["kit"]:
+                names.append(f"'{kit_name}' 킷")
+                saves.append(save_kit)
+            if _common_snapshot() != base["common"]:
+                names.append("회사 공통 값")
+                saves.append(save_common)
+        except Exception:  # noqa: BLE001 — 비교가 안 되면 묻지 않고 보낸다
+            names = []
+        if not names:
+            proceed()
+            return
+        ask_save_before_leave(page, names, saves, proceed)
+
+    state.before_leave = before_leave
+
+    save_button = ft.FilledButton(f"'{kit_name}' 킷 저장", icon=ft.Icons.SAVE, on_click=save_kit)
+    common_save_button = ft.FilledButton("회사 공통 저장", icon=ft.Icons.SAVE, on_click=save_common)
 
     # --- 제목 반복 방지 (Streamlit에선 "폼 밖" 제약이 있었지만 Flet엔 없음) -------
     history_count = repo.title_history_count()
@@ -585,7 +629,9 @@ def _build_screen(page: ft.Page, state: AppState, render) -> ft.Control:
             ft.Row(
                 [
                     ft.TextButton(f"이력 {history_count}건 보기/숨기기", on_click=toggle_history),
-                    ft.TextButton("🗑️ 제목 이력 전체 삭제", on_click=clear_history),
+                    ft.TextButton("🗑️ 제목 이력 전체 삭제", on_click=lambda e: confirm(
+                        page, "제목 이력을 모두 지울까요?", "지금까지 만든 제목 기억이 사라져, 예전 제목과 비슷한 제목이 다시 나올 수 있습니다. 되돌릴 수 없습니다.",
+                        lambda: clear_history(e))),
                 ]
             ),
             history_list,
@@ -605,7 +651,7 @@ def _build_screen(page: ft.Page, state: AppState, render) -> ft.Control:
             ft.Divider(),
             ft.Text(f"✏️ '{kit_name}' 킷 편집", size=fs(18, scale), weight=ft.FontWeight.BOLD),
             ft.Text(
-                "아래 값은 이 킷으로 쓰는 글에만 쓰입니다. 저장하지 않은 수정은 다른 킷을 편집하러 가면 사라집니다.",
+                "아래 값은 이 킷으로 쓰는 글에만 쓰입니다. 저장하지 않고 다른 킷이나 메뉴로 가려 하면 저장할지 묻습니다.",
                 size=fs(12, scale),
                 color=BRAND_COLORS["text_muted"],
             ),

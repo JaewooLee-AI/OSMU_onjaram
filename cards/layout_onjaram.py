@@ -127,7 +127,7 @@ class OnjaramLayoutMixin:
 
     # ------------------------------------------------------------------ 진입점
     def _layout_oj(self, ctx, photo: Optional[Image.Image]) -> Image.Image:
-        W, H, M = self.WIDTH, self.HEIGHT, self.MARGIN
+        W, H = self.WIDTH, self.HEIGHT
         pal = self._oj_palette(ctx)
         img = Image.new("RGB", (W, H), pal["bg"])
         draw = ImageDraw.Draw(img)

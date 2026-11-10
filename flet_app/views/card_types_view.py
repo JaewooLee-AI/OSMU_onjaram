@@ -11,7 +11,9 @@ import os
 import flet as ft
 
 from cards import card_types, design_templates, preview
+from core import repo
 
+from flet_app.dialogs import confirm
 from flet_app.image_src import b64_src
 from flet_app.theme import BRAND_COLORS, fs
 
@@ -61,7 +63,8 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
         picker = None
         if with_design_picker is not None:
             picker = ft.Dropdown(label="미리볼 디자인", value=with_design_picker, dense=True, width=300,
-                                 options=[ft.DropdownOption(key=d.id, text=d.name) for d in design_templates.list_all()])
+                                 options=[ft.DropdownOption(key=d.id, text=d.name)
+                                          for d in design_templates.choices(keep=[with_design_picker])])
         pal_picker = ft.Dropdown(label="배색 (브랜드 컬러)", value="", dense=True, width=300,
                                  options=[ft.DropdownOption(key="", text="브랜드 기본 (브랜드 킷 색)")]
                                  + [ft.DropdownOption(key=k, text=v["name"]) for k, v in design_templates.BRAND_PALETTES.items()])
@@ -118,7 +121,8 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
         cdef = ft.TextField(label="기본 장수", value=str(c.get("default", 5)), width=110, dense=True)
         cmax = ft.TextField(label="최대 장수", value=str(c.get("max", 8)), width=110, dense=True)
         layout = ft.Dropdown(label="기본 디자인", value=pack.get("layout_default") or "editorial", dense=True, width=360,
-                             options=[ft.DropdownOption(key=d.id, text=d.name) for d in design_templates.list_all()])
+                             options=[ft.DropdownOption(key=d.id, text=d.name)
+                                      for d in design_templates.choices(keep=[pack.get("layout_default")])])
         structure = ft.TextField(label="AI에게 줄 구성 지침", value=pack.get("llm_structure", ""), multiline=True,
                                  min_lines=3, max_lines=6, dense=True)
         template = ft.TextField(label="작성 틀 (【 】 칸을 채워 쓰는 원고 양식)", value=pack.get("template", ""),
@@ -244,7 +248,9 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
                 ft.OutlinedButton("미리보기", icon=ft.Icons.IMAGE_OUTLINED, on_click=pv_toggle),
                 ft.IconButton(icon=ft.Icons.COPY_OUTLINED, tooltip="복제해서 수정", on_click=on_duplicate),
                 ft.IconButton(icon=ft.Icons.CODE, tooltip="JSON 내보내기", on_click=lambda e: open_json(pack["id"])),
-                *([ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="지우기", on_click=on_delete)] if custom else []),
+                *([ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="지우기", on_click=lambda e: confirm(
+                    page, "이 카드 종류를 지울까요?", f"'{pack['name']}'을(를) 지우면 되돌릴 수 없습니다. 이미 이 종류로 만든 카드는 그대로입니다.",
+                    lambda: on_delete(e)))] if custom else []),
             ], vertical_alignment=ft.CrossAxisAlignment.START), pv_area], spacing=6),
             border=ft.Border.all(1, "#14000000"), border_radius=8, padding=10,
         )
@@ -319,28 +325,41 @@ def build_card_types_tab(page: ft.Page, scale: float) -> ft.Control:
                   if not design.builtin else []),
                 ft.OutlinedButton("미리보기", icon=ft.Icons.IMAGE_OUTLINED, on_click=pv_toggle),
                 ft.IconButton(icon=ft.Icons.COPY_OUTLINED, tooltip="복제해서 수정", on_click=on_duplicate),
-                *([ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="지우기", on_click=on_delete)] if not design.builtin else []),
+                *([ft.IconButton(icon=ft.Icons.DELETE_OUTLINE, tooltip="지우기", on_click=lambda e: confirm(
+                    page, "이 디자인을 지울까요?", f"'{design.name}'을(를) 지우면 되돌릴 수 없습니다. 이 디자인으로 만든 글은 기본 디자인으로 다시 그려집니다.",
+                    lambda: on_delete(e)))] if not design.builtin else []),
             ]), pv_area], spacing=6),
             border=ft.Border.all(1, "#14000000"), border_radius=8, padding=10,
         )
 
+    def on_legacy_toggle(e: ft.Event) -> None:
+        repo.save_app_settings(show_legacy_designs=bool(e.control.value))
+        rebuild("이전 디자인을 목록에 보입니다." if e.control.value else "이전 디자인을 목록에서 숨겼습니다.")
+
     def _body() -> ft.Control:
         packs, errors = card_types.load_all(include_hidden=True)
+        show_legacy = design_templates.show_legacy()
+        legacy_count = sum(1 for d in design_templates.list_all() if design_templates.is_legacy(d))
         return ft.Column([
             ft.Row([ft.Text("카드 종류", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
                     ft.OutlinedButton("JSON 가져오기", icon=ft.Icons.UPLOAD, on_click=open_import)],
                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
             ft.Text("종류는 장 구성·작성 틀·AI 지침을 담은 데이터입니다. 내장 종류는 [복제해서 수정]으로 내 종류를 만들고, "
-                    "상태를 '사용'으로 바꾸면 카드뉴스 탭의 종류 목록에 나옵니다.",
+                    "상태를 '사용'으로 바꾸면 카드·쇼츠 화면의 종류 목록에 나옵니다.",
                     size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
             *[ft.Container(content=ft.Text(f"⚠️ {name}: {'; '.join(problems)}", size=fs(11, scale), color="#8A6D3B"),
                            bgcolor="#FFF6E5", padding=8, border_radius=6) for name, problems in errors.items()],
             *[type_row(p, packs) for p in packs.values()],
             ft.Divider(),
             ft.Text("디자인", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
-            ft.Text("카드의 모양(레이아웃·3단 비율·색)입니다. 같은 3단 디자인을 카드와 쇼츠가 함께 씁니다.",
+            ft.Text("카드의 모양(레이아웃·색)입니다. 쇼츠도 카드와 같은 디자인으로 만듭니다.",
                     size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
-            *[design_row(d) for d in design_templates.list_all()],
+            ft.Switch(label=f"이전 디자인도 보기 ({legacy_count}개 · 개발 중 시험용)", value=show_legacy,
+                      on_change=on_legacy_toggle),
+            ft.Text("꺼 두면(기본) 디자인 목록에 온자람 디자인과 내가 만든 디자인만 나옵니다. 이전 디자인으로 이미 만든 글은 "
+                    "꺼져 있어도 그 디자인 그대로 열리고 다시 그릴 수 있습니다(지우지 않고 목록에서만 숨깁니다).",
+                    size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
+            *[design_row(d) for d in design_templates.choices(include_legacy=show_legacy)],
         ], spacing=8, scroll=ft.ScrollMode.AUTO)
 
     box.content = _body()

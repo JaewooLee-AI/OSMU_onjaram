@@ -36,14 +36,14 @@ class DesignTemplate(BaseModel):
     image_aspect: str = Field(default="4:5", description="AI 그림 화면비 (그림 영역 모양에 맞춤: 일러스트형은 가로로 넓은 16:9)")
     ratio: List[int] = Field(default_factory=lambda: [2, 5, 3], description="tri(3단) 레이아웃의 위:가운데:아래 높이 비율")
     variant: str = Field(default="warm", description="oj(온자람 전용) 레이아웃의 변형: warm(공감·회복) | trust(전문·신뢰). "
-                         "ed(에디토리얼): dark(어두운 배경) | photo(큰 사진) | 그 밖의 값은 기본")
+                         "ed(에디토리얼): dark(어두운 배경) | photo(큰 사진) | 그 밖의 값은 기본. rp(신뢰 리포트): dark(네이비 바탕)")
     tri_theme: str = Field(default="light", description="tri 레이아웃 색: light(브랜드 밝은 배경) | dark(어두운 배경)")
 
     def uses_photo(self, slide_type: str) -> bool:
         """이 디자인에서 그 종류의 카드가 사진·그림을 쓰는지 (안 쓰는 카드는 AI 그림을 만들지 않아 비용을 아낌)"""
         if self.layout == "tri":   # 사진·영상 자리가 있는 모양: 인포그래픽 종류는 사진 없이 그린다
             return slide_type not in ("numbered", "steps", "checklist", "big_number", "comparison_table", "event_info")
-        if self.layout == "ed":   # 에디토리얼: 표지·본문류만 둥근 사진 칸, 목록·안내·숫자 카드는 칸 안에서 그린다
+        if self.layout in ("ed", "rp"):   # 에디토리얼·신뢰 리포트: 표지·본문류만 둥근 사진 칸, 목록·안내·숫자 카드는 칸 안에서 그린다
             return slide_type in ("cover", "body", "single", "quote", "qa")
         if self.layout == "oj":   # 온자람 전용: 표지·본문류만 사진 칸이 있고 나머지는 카드 안에서 그린다
             return slide_type in ("cover", "body", "single", "quote", "qa")
@@ -86,6 +86,16 @@ BUILTINS: List[DesignTemplate] = [
                    image_aspect="4:3",
                    description="에디토리얼 구성에서 표지·본문 사진을 크게. 현장 후기처럼 사진이 주인공인 글에 어울립니다.",
                    colors={"primary": "#35593F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="report", name="온자람 신뢰 리포트 (Stitch 시안 · 네이비 띠·번호 표·인장 체크)", builtin=True, layout="rp", radius=10,
+                   image_aspect="16:9",
+                   description="'전문·신뢰' 트랙(기관·학교·EAP 안내)용. 위 네이비 띠에 시리즈 라벨과 쪽 번호, 가는 선으로 나눈 제목, "
+                               "상자 없이 줄로 나눈 큰 번호 목록, 라벨 열이 있는 안내 표, 오트 칸 요약과 인장 모양 체크. "
+                               "네이비·크림·오트가 주조색이고 코랄은 한 군데만 씁니다.",
+                   colors={"primary": "#2C4A6F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5"}),
+    DesignTemplate(id="report-navy", name="온자람 신뢰 리포트 · 네이비 바탕", builtin=True, layout="rp", variant="dark", radius=10,
+                   image_aspect="16:9",
+                   description="신뢰 리포트 구성을 진한 네이비 바탕에 흰 글자로. 발표 자료·공지처럼 무게감 있게 보여야 할 때.",
+                   colors={"primary": "#2C4A6F", "secondary": "#4A7C59", "accent": "#E07A5F", "background": "#FAF8F5", "dark_bg": "#1C2F47"}),
     DesignTemplate(id="tri-2-5-3", name="3단 (위 제목 · 가운데 사진/인포그래픽 · 아래 소속) 2:5:3", builtin=True, layout="tri",
                    ratio=[2, 5, 3], radius=32,
                    description="위에 제목, 가운데에 사진·영상 또는 번호 단계 인포그래픽, 아래에 한 줄 요약과 소속·연락처. "
@@ -120,14 +130,38 @@ BUILTINS: List[DesignTemplate] = [
 
 # 에디토리얼 계열이 기본. 그 밖의 내장 디자인은 '이전 디자인'으로 목록 뒤에 둔다(이미 그 디자인으로 만든 글이 있어 지우지 않음).
 LEGACY_PREFIX = "(이전) "
+# 지금 쓰는 레이아웃(온자람 전용 디자인). 쇼츠도 이 레이아웃이면 쇼츠 전용 화면(cards/shorts_ed.py)으로 만든다.
+CURRENT_LAYOUTS = ("ed", "rp")
 for _t in BUILTINS:
-    if _t.layout != "ed":
+    if _t.layout not in CURRENT_LAYOUTS:
         _t.name = LEGACY_PREFIX + _t.name
-BUILTINS.sort(key=lambda t: t.layout != "ed")
+BUILTINS.sort(key=lambda t: CURRENT_LAYOUTS.index(t.layout) if t.layout in CURRENT_LAYOUTS else len(CURRENT_LAYOUTS))
 
 
 def is_legacy(t: DesignTemplate) -> bool:
-    return t.builtin and t.layout != "ed"
+    return t.builtin and t.layout not in CURRENT_LAYOUTS
+
+
+def native_shorts(layout: str) -> bool:
+    """쇼츠를 쇼츠 전용 화면(큰 자막·목록 순차 등장·사진 칸만 움직임)으로 만드는 레이아웃인지."""
+    return layout in CURRENT_LAYOUTS
+
+
+def show_legacy() -> bool:
+    """설정 → 🃏 카드 종류·디자인의 '이전 디자인도 보기'(app_settings.show_legacy_designs, 기본 꺼짐)."""
+    try:
+        from core import repo
+        return bool(repo.get_app_settings().get("show_legacy_designs"))
+    except Exception:
+        return False
+
+
+def choices(keep=(), include_legacy: Optional[bool] = None) -> List[DesignTemplate]:
+    """고르는 목록에 보여 줄 디자인. 이전 디자인은 설정을 켰을 때만 — 단 keep에 든 id(이미 그 디자인으로 만든 글,
+    그 디자인을 기본으로 둔 종류)는 꺼져 있어도 남겨서 고른 값이 빈칸으로 보이지 않게 한다. 렌더·get()은 그대로 모든 디자인을 쓴다."""
+    show = show_legacy() if include_legacy is None else include_legacy
+    keep_ids = {split_id(k)[0] for k in keep if k}
+    return [t for t in list_all() if show or not is_legacy(t) or t.id in keep_ids]
 
 
 def _path(template_id: str) -> str:

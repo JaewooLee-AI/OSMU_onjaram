@@ -10,7 +10,7 @@ from __future__ import annotations
 import contextvars
 import uuid
 from contextlib import contextmanager
-from datetime import date, datetime, timedelta
+from datetime import datetime
 from typing import Any, Dict, Iterator, List, Optional
 
 from core.db import (
@@ -53,7 +53,7 @@ _APP_SETTINGS_JSON_COLS = {"enabled_channels": ["instagram", "shorts"]}
 _CAMPAIGN_BOOL_COLS = ("guardrail_passed",)
 _BRAND_KIT_BOOL_COLS = ("is_archived",)
 _COMPANY_BOOL_COLS = ("guardrail_enabled",)
-_APP_SETTINGS_BOOL_COLS = ("vision_enabled", "naver_keywords_enabled")
+_APP_SETTINGS_BOOL_COLS = ("vision_enabled", "naver_keywords_enabled", "show_legacy_designs")
 
 # 킷마다 따로 두는 값. 이 밖의 값은 회사 공통(company_profile)이거나 앱 설정(app_settings)입니다.
 BRAND_KIT_FIELDS = (
@@ -64,7 +64,7 @@ BRAND_KIT_FIELDS = (
 # 킷을 복제할 때 옮기는 값 — 이름만 빼고 전부.
 _KIT_COPY_FIELDS = tuple(f for f in BRAND_KIT_FIELDS if f != "name")
 COMPANY_FIELDS = _COMPANY_COLUMNS + ("phone", "email", "address")
-APP_SETTINGS_FIELDS = _APP_SETTINGS_COLUMNS + ("naver_keywords_enabled",)
+APP_SETTINGS_FIELDS = _APP_SETTINGS_COLUMNS + ("naver_keywords_enabled", "show_legacy_designs")
 
 
 def _decode(row, json_cols: Dict[str, Any], bool_cols) -> Optional[Dict[str, Any]]:
