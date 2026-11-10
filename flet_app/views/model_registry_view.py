@@ -263,6 +263,7 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
         def show_choices() -> None:
             priced, available = found["priced"], found["available"]
             rec = google_catalog.recommend(priced, available)
+            avail_set = set(available or [])
             slots = repo.get_slots()
             rows, dropdowns = [], {}
             for slot in google_catalog.RULES:
@@ -277,7 +278,8 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
                                size=fs(10, scale), color=BRAND_COLORS["text_muted"])
                 dd = ft.Dropdown(label=repo.MODEL_SLOTS[slot][0], width=600, dense=True, value=chosen,
                                  options=[ft.DropdownOption(key=m, text=f"{priced[m]['name']}  ({m})"
-                                                            + ("  ← 추천" if m == rec[slot] else "") + ("  (지금 사용 중)" if m == keep else "")) for m in options]
+                                                            + ("  ← 추천" if m == rec[slot] else "") + ("  (지금 사용 중)" if m == keep else "")
+                                                            + ("" if m in avail_set else "  (키 목록에 없음)")) for m in options]
                                  + ([ft.DropdownOption(key=KEEP, text=f"지금 설정 유지: {other['display_name']} ({other['vendor']})")] if other else []))
 
                 def on_pick(e, info=info, dd=dd) -> None:
@@ -294,6 +296,8 @@ def build_models_tab(page: ft.Page, scale: float, on_changed=None) -> ft.Control
             def on_apply(e: ft.Event) -> None:
                 try:
                     done = google_catalog.apply({k: (None if d.value == KEEP else d.value) for k, d in dropdowns.items()}, priced)
+                    # 고른 모델이 없어 건너뛴 기능도 알려 준다(조용히 빠지지 않게)
+                    done += [f"{repo.MODEL_SLOTS[k][0]}: 고른 모델이 없어 그대로 둠" for k, d in dropdowns.items() if not d.value]
                 except ValueError as exc:
                     say(f"❌ {exc}", ok=False)
                     return

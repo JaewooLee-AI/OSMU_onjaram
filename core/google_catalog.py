@@ -193,9 +193,6 @@ def _version(model_id: str) -> tuple:
 def candidates(slot: str, priced: Dict[str, Dict[str, Any]], available: Optional[List[str]]) -> List[str]:
     """그 슬롯에 고를 수 있는 모델(가격표에 있고, 키로 쓸 수 있는 것). 추천 순서대로."""
     pool = [m for m in priced if not any(x in m for x in _EXCLUDE) and not priced[m].get("shutdown")]
-    if available is not None:
-        avail = set(available)
-        pool = [m for m in pool if m in avail]
     need = SLOT_NEEDS[slot]
     if need == "image":
         pool = [m for m in pool if priced[m].get("per_image") is not None or "image" in m]
@@ -203,6 +200,12 @@ def candidates(slot: str, priced: Dict[str, Dict[str, Any]], available: Optional
         pool = [m for m in pool if m.endswith("-tts")]
     else:
         pool = [m for m in pool if "image" not in m and not m.endswith("-tts")]
+    if available is not None:
+        # 키의 모델 목록(models.list)에 그 용도 모델이 하나도 안 나오는 경우가 있다(특히 음성 TTS 모델 — 목록에서 빠져도
+        # 호출은 되는 계정이 있음). 그때는 슬롯을 조용히 비우지 않고 가격표의 후보를 그대로 보여 준다(화면에 '목록에 없음' 표시).
+        avail = set(available)
+        listed = [m for m in pool if m in avail]
+        pool = listed or pool
     ranked: List[str] = []
     for preview_ok in (False, True):
         for rule in RULES[slot]:

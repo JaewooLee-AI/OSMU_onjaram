@@ -236,3 +236,11 @@ def test_format_problems_detects_broken_prices():
     broken = {k: dict(v, input=None, output=None, per_image=None) for k, v in p.items()}
     assert len(g.format_problems(broken)) == 3
     assert "관리자" in g.FORMAT_MESSAGE
+
+
+def test_tts_still_recommended_when_key_list_omits_tts_models():
+    p = g.parse_pricing(SAMPLE, TODAY)
+    # 키의 모델 목록에 글쓰기·이미지 모델만 있고 TTS 모델이 빠진 계정
+    rec = g.recommend(p, ["gemini-9.1-flash", "gemini-9.1-flash-image"])
+    assert rec["tts"] == "gemini-9.1-flash-tts"
+    assert rec["text"] == "gemini-9.1-flash"
