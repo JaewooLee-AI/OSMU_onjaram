@@ -69,7 +69,18 @@ def test_blog_runs_pipeline_and_cards_use_its_text(campaign, monkeypatch):
     monkeypatch.setattr(outputs, "run_pipeline", fake_pipeline)
     outputs.run_outputs(campaign, ["blog", "cards"], use_ai=False)
     sb = card_studio.load_storyboard(repo.get_campaign(campaign))
-    assert "첫 문장" in sb.card_slides[0].lead_headline
+    assert sb.card_slides[0].lead_headline == "제목"                     # 표지 = 블로그 제목
+    assert any("첫 문장" in (c.lead_headline + c.body_content) for c in sb.card_slides[1:])   # 본문 문장이 이어서 들어감
+
+
+def test_rule_based_plan_skips_greeting_image_and_markup(campaign):
+    body = ("안녕하세요, 마음성장파트너 주식회사 온자람입니다.\n[IMAGE: 202611/a.jpg]\n"
+            "## 1. 긴장은 신호입니다\n**중요한** 일을 앞두면 몸이 굳습니다.\n---\n숨을 길게 내쉬어 봅니다.")
+    repo.update_campaign(campaign, content=body, title="연말 긴장 풀기")
+    sb, _ = outputs.plan_for_campaign(campaign, type_id="howto", use_ai=False)
+    text = " ".join(c.lead_headline + " " + c.body_content for c in sb.card_slides)
+    assert sb.card_slides[0].lead_headline == "연말 긴장 풀기"
+    assert "안녕하세요" not in text and "IMAGE" not in text and "##" not in text and "**" not in text
 
 
 def test_cards_changed_after_render_are_flagged_stale_until_redrawn(campaign):

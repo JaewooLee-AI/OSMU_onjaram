@@ -92,6 +92,8 @@ def plan_for_campaign(campaign_id: str, type_id: Optional[str] = None, design_id
 
     campaign = repo.get_campaign(campaign_id) or {}
     text = (source or campaign.get("content") or campaign.get("memo") or "").strip()
+    if not source and (campaign.get("content") or "").strip() and (campaign.get("title") or "").strip():
+        text = f"{campaign['title'].strip()}\n{text}"   # 블로그 본문으로 만들 때는 글 제목이 표지 제목이 되게
     if not text:
         raise ValueError("카드·쇼츠를 만들 원고가 없습니다. 메모를 입력하거나 블로그도 함께 만드세요.")
     if use_ai is None:

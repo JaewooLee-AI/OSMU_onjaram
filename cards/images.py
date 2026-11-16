@@ -67,7 +67,7 @@ def _asset(sb: EditableStoryboard, asset_id: Optional[str]) -> Optional[MediaAss
 def apply_mode(sb: EditableStoryboard, user_assets: Optional[List[MediaAsset]] = None) -> None:
     """모드에 맞게 내 사진을 사진 칸에 자동 배치합니다(직접 고른 카드는 그대로).
     own_only·own_first는 올린 사진을 차례로 배치하고, ai_first는 자동 배치하지 않습니다."""
-    users = [a for a in (user_assets if user_assets is not None else sb.assets) if a.source == "user" and a.kind in ("image", "video")]
+    users = [a for a in (user_assets if user_assets is not None else sb.assets) if a.source == "user" and a.kind == "image"]   # 동영상은 쇼츠 장면에서만 직접 고른다
     for s in sb.card_slides:
         if not s.asset_locked and (_asset(sb, s.asset_id) is None or _asset(sb, s.asset_id).source == "user"):
             s.asset_id = None

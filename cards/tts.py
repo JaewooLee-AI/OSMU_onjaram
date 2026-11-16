@@ -95,7 +95,12 @@ class GeminiTTS:
             if not setting or not setting.get("is_active"):
                 raise TtsUnavailable("Gemini API 키가 없습니다(⚙️ 설정 → 🤖 AI 연결·모델).")
             from google import genai
-            self._client = genai.Client(api_key=decrypt_api_key(setting["encrypted_api_key"]))
+            from google.genai import types
+            # google-genai 최근 판의 기본값(v1)은 generationConfig.speechConfig를 거부하므로 v1beta를 명시한다.
+            self._client = genai.Client(
+                api_key=decrypt_api_key(setting["encrypted_api_key"]),
+                http_options=types.HttpOptions(api_version="v1beta"),
+            )
         return self._client
 
     async def synthesize_all(self, texts: List[str], out_paths: List[str]) -> int:

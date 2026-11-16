@@ -27,6 +27,9 @@ from ai_workers.content_writer import (
     revise_content,
     run_pipeline,
 )
+import os
+
+from cards import ffmpeg_tools
 from core import repo, storage
 
 import flet_app.simulators as sim
@@ -576,28 +579,89 @@ def _build_campaign_editor(
                 attached.append(rel)
                 added = True
         if added:
-            repo.update_campaign(campaign_id, storage_file_paths=attached)
-            # 초안을 만든 뒤 올린 사진은 '📷 사진 자리' 표시가 있던 곳에 차례로 넣습니다(AI 호출 없음).
-            fresh = repo.get_campaign(campaign_id) or {}
-            if (fresh.get("content") or "").strip():
-                new_content, new_fmt, placed = formatting.fill_photo_hints(
-                    fresh["content"], fresh.get("content_format"), attached,
-                )
-                if placed:
-                    repo.update_campaign(campaign_id, content=new_content, content_format=new_fmt)
-                    left = len(formatting.unplaced_photos(new_content, attached))
-                    page.show_dialog(ft.SnackBar(ft.Text(
-                        f"📷 사진 {placed}장을 '사진 자리'에 넣고 그 표시를 지웠습니다."
-                        + (f" 자리가 없는 사진 {left}장은 게시할 때 글 끝에 붙습니다." if left else "")
-                    )))
-                    reload()
-                    return
-            upload_status.value = f"{len(files)}장 업로드했습니다."
-            _render_photos()
-            _render_cost()
-            photo_row.update()
-            cost_box.update()
+            _after_added(f"{len(files)}장 업로드했습니다.")
+
+    def _after_added(done_msg: str) -> None:
+        """새로 붙은 사진을 저장하고, 초안이 있으면 '사진 자리'에 넣은 뒤 화면을 갱신한다."""
+        repo.update_campaign(campaign_id, storage_file_paths=attached)
+        # 초안을 만든 뒤 올린 사진은 '📷 사진 자리' 표시가 있던 곳에 차례로 넣습니다(AI 호출 없음).
+        fresh = repo.get_campaign(campaign_id) or {}
+        if (fresh.get("content") or "").strip():
+            new_content, new_fmt, placed = formatting.fill_photo_hints(
+                fresh["content"], fresh.get("content_format"), attached,
+            )
+            if placed:
+                repo.update_campaign(campaign_id, content=new_content, content_format=new_fmt)
+                left = len(formatting.unplaced_photos(new_content, attached))
+                page.show_dialog(ft.SnackBar(ft.Text(
+                    f"📷 사진 {placed}장을 '사진 자리'에 넣고 그 표시를 지웠습니다."
+                    + (f" 자리가 없는 사진 {left}장은 게시할 때 글 끝에 붙습니다." if left else "")
+                )))
+                reload()
+                return
+        upload_status.color = "#1B6E3C"
+        upload_status.value = done_msg
+        _render_photos()
+        _render_cost()
+        photo_row.update()
+        cost_box.update()
+        upload_status.update()
+
+    VIDEO_NOTICE = ("동영상 한 편에서 대표 장면 한 컷을 뽑아 블로그 사진으로 쓰고, 영상 원본은 쇼츠용으로 저장합니다"
+                    "(원래 소리는 쓰지 않습니다).\n\n올리기 전에 확인하세요.\n"
+                    "· 내담자가 나오거나 내담자를 알아볼 수 있는 영상은 쓰지 않습니다.\n"
+                    "· 얼굴·이름표·차량 번호판이 보이는 사람에게 게시 동의를 받았습니다.\n"
+                    f"· 한 편은 {storage.MAX_VIDEO_MB}MB까지 올릴 수 있습니다.")
+
+    async def pick_videos() -> None:
+        web = bool(getattr(page, "web", False))      # 브라우저 실행은 파일 경로가 없어 내용을 받아야 한다
+        files = await ft.FilePicker().pick_files(
+            allow_multiple=True, with_data=web, file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=[e.lstrip(".") for e in sorted(storage.VIDEO_EXTS)],
+        )
+        if not files:
+            return
+        card_paths = list((repo.get_campaign(campaign_id) or {}).get("card_photo_paths") or [])
+        videos, frames, problems = 0, 0, []
+        for f in files:
+            src = getattr(f, "path", None)
+            try:
+                if src and os.path.isfile(src):
+                    rel = storage.save_video(f.name, src_path=src)
+                elif f.bytes:
+                    rel = storage.save_video(f.name, raw=f.bytes)
+                else:
+                    problems.append(f"{f.name}: 파일을 읽지 못했습니다")
+                    continue
+            except storage.VideoTooLarge as exc:
+                problems.append(f"{f.name}: {exc} — {storage.MAX_VIDEO_MB}MB를 넘습니다. 필요한 부분만 잘라서 올려 주세요")
+                continue
+            except OSError as exc:
+                problems.append(f"{f.name}: 저장하지 못했습니다({type(exc).__name__})")
+                continue
+            if rel not in card_paths:
+                card_paths.append(rel)
+                videos += 1
+            frame = ffmpeg_tools.extract_frame(str(storage.abs_path(rel)))
+            if frame:
+                thumb = storage.save_upload(frame, f"{os.path.splitext(f.name)[0]}_장면.jpg")
+                if thumb not in attached:
+                    attached.append(thumb)
+                    frames += 1
+            else:
+                problems.append(f"{f.name}: 대표 장면을 뽑지 못했습니다(FFmpeg 확인). 영상은 쇼츠용으로만 저장했습니다")
+        if videos:
+            repo.update_campaign(campaign_id, card_photo_paths=card_paths)
+        if videos or frames:
+            _after_added(f"✅ 동영상 {videos}편을 올리고 대표 장면 {frames}컷을 블로그 사진으로 넣었습니다. 영상은 🃏 카드·쇼츠의 쇼츠 장면에서 고릅니다."
+                         + "".join(f" ⚠️ {p}" for p in problems))
+        else:
+            upload_status.color = "#B3261E"
+            upload_status.value = "새로 올린 동영상이 없습니다. " + " ".join(problems)
             upload_status.update()
+
+    def on_pick_videos(e: ft.Event) -> None:
+        confirm(page, "동영상 올리기", VIDEO_NOTICE, lambda: page.run_task(pick_videos), ok_label="확인하고 올리기", danger=False)
 
     _render_photos()
     _render_cost()
@@ -606,7 +670,8 @@ def _build_campaign_editor(
         ft.Row([
             ft.Text("📷 사진", weight=ft.FontWeight.BOLD, size=fs(13, scale)),
             ft.OutlinedButton("사진 추가 (1280px JPEG로 자동 축소 저장)", icon=ft.Icons.UPLOAD_FILE, on_click=on_pick_photos),
-        ]),
+            ft.OutlinedButton("동영상 추가 (대표 장면 → 블로그 사진)", icon=ft.Icons.VIDEO_CALL, on_click=on_pick_videos),
+        ], wrap=True),
         photo_row,
         upload_status,
         cost_box,

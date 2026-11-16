@@ -114,6 +114,14 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
         except (OSError, ValueError):
             return bk.active_kit()
 
+    # --- 글자 잘림 점검 ---------------------------------------------------------
+    # 그리는 동안 "자리가 모자라 '…'로 자르거나 줄을 버린 글"을 기억해 두었다가 카드별로 남긴다(`clips[카드 번호]`).
+    # 같은 글을 크기를 바꿔 다시 맞추는 경우가 있어, 글마다 마지막 결과만 본다.
+    def _clip(self, text: str, cut: bool) -> None:
+        pending = getattr(self, "_clip_pending", None)
+        if pending is not None and (text or "").strip():
+            pending[(text or "").strip()] = bool(cut)
+
     def slide_path(self, index: int) -> str:
         return os.path.join(self.export_dir, f"slide_{index + 1:02d}.png")
 
@@ -123,22 +131,32 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
         paths = [await self.render_slide(storyboard, i) for i in range(len(storyboard.card_slides))]
         return paths
 
-    async def render_slide(self, storyboard: EditableStoryboard, index: int) -> str:
+    async def render_slide(self, storyboard: EditableStoryboard, index: int,
+                           asset_override: Optional[MediaAsset] = None) -> str:
         """카드 한 장만 다시 그리기 (카드별 수정 후 즉시 반영용)"""
         kit = self._kit(storyboard)
         slide = storyboard.card_slides[index]
         total = len(storyboard.card_slides)
         out_path = self.slide_path(index)
         photo = None
-        asset = storyboard.asset(slide.asset_id)
-        if asset and slide.slide_type not in ("comparison_table", "big_number", "event_info"):
-            photo = await asyncio.to_thread(self._load_asset_image, asset)
+        allow_photo = getattr(self, "ED_SHORTS", False) or slide.slide_type not in ("comparison_table", "big_number", "event_info")
+        if allow_photo:
+            for cand in (asset_override, storyboard.asset(slide.asset_id)):
+                if cand is not None:
+                    photo = await asyncio.to_thread(self._load_asset_image, cand)
+                    if photo is not None:
+                        break
         design = design_templates.get(storyboard.design_id)
         if self.FOLLOW_ASPECT:       # 카드 크기: 3단 디자인만 높이를 바꾼다(쇼츠가 자기 높이로 그릴 때는 따르지 않는다)
             from cards.schema import CARD_ASPECTS
             self.HEIGHT = CARD_ASPECTS.get(getattr(storyboard, "aspect", "4:5"), 1350) if design.layout in ("tri", "oj", "ed", "rp") else 1350
         ctx = _Ctx(kit, storyboard.brand_elements, index, total, slide, design)
+        self._clip_pending = {}
         img = await asyncio.to_thread(self._draw, ctx, photo)
+        if not hasattr(self, "clips"):
+            self.clips = {}
+        self.clips[index] = [t for t, cut in self._clip_pending.items() if cut]
+        self._clip_pending = None
         img.save(out_path, "PNG")
         return out_path
 
@@ -506,6 +524,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             font = display_font(size, text)
             lines = wrap_text_balanced(text or "", font, width)
             if len(lines) <= max_lines or size <= minimum:
+                self._clip(text, len(lines) > max_lines)
                 if len(lines) > max_lines:
                     lines = lines[:max_lines]
                     lines[-1] = lines[-1].rstrip() + "…"
@@ -1245,6 +1264,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             font = display_font(size, text) if weight == "bold" else korean_font(size, weight)
             lines = wrap_text_px(text or "", font, max_width)
             if len(lines) <= max_lines or size <= minimum:
+                self._clip(text, len(lines) > max_lines)
                 if len(lines) > max_lines:
                     lines = lines[:max_lines]
                     lines[-1] = lines[-1].rstrip() + "…"
@@ -1285,8 +1305,11 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
                 y += lh
             y += int(lh * 0.45)
 
-    def _draw_table(self, draw, header: List[str], rows: List[List[str]], box, ctx: "_Ctx"):
-        """열 폭 자동 배분 + 셀 내부 줄바꿈 + 넘침 시 글자 크기 축소"""
+    def _draw_table(self, draw, header: List[str], rows: List[List[str]], box, ctx: "_Ctx",
+                    start: int = 34, stretch: bool = False, pal: Optional[dict] = None):
+        """열 폭 자동 배분 + 셀 내부 줄바꿈 + 넘침 시 글자 크기 축소.
+        start: 시작 글자 크기. stretch: 남는 높이를 줄 여백으로 나눠 칸을 채움. pal: 색(head·head_ink·row_a·row_b·line·ink·text·accent)."""
+        pal = pal or {}
         x0, y0, x1, y1 = box
         total_w = x1 - x0
         n_cols = len(header)
@@ -1294,7 +1317,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
         other_w = (total_w - first_w) // max(1, n_cols - 1)
         col_ws = [first_w] + [other_w] * (n_cols - 1)
         pad = 16
-        size = 34
+        size = start
         while True:
             font = korean_font(size, "medium")
             bold = korean_font(size, "bold")
@@ -1307,26 +1330,35 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             if head_h + sum(row_hs) <= (y1 - y0) or size <= 18:
                 break
             size -= 2
+        extra = 0
+        if stretch:      # 남는 높이를 줄마다 나눠 준다(줄 하나에 최대 70px)
+            spare = (y1 - y0) - head_h - sum(row_hs)
+            extra = max(0, min(70, spare // (len(row_hs) + 1)))
+            head_h += extra
+            row_hs = [h + extra for h in row_hs]
         y = y0 + max(0, ((y1 - y0) - head_h - sum(row_hs)) // 2)
-        draw.rounded_rectangle([x0, y, x1, y + head_h], radius=10, fill=ctx.c.primary)
+        draw.rounded_rectangle([x0, y, x1, y + head_h], radius=10, fill=pal.get("head") or ctx.c.primary)
         x = x0
         for lines, w in zip(head_lines, col_ws):
-            ty = y + pad
+            ty = y + pad + extra // 2
             for line in lines:
-                draw.text((x + pad, ty), line, font=bold, fill="#FFFFFF")
+                draw.text((x + pad, ty), line, font=bold, fill=pal.get("head_ink") or "#FFFFFF")
                 ty += lh
             x += w
         y += head_h
         for r_idx, (lines_per_cell, rh) in enumerate(zip(row_lines, row_hs)):
             if y + rh > y1 + 4:
                 break
-            draw.rectangle([x0, y, x1, y + rh], fill=ctx.c.background if r_idx % 2 == 0 else "#FFFFFF")
-            draw.line([x0, y + rh, x1, y + rh], fill="#E2E8F0", width=1)
+            draw.rectangle([x0, y, x1, y + rh], fill=(pal.get("row_a") or ctx.c.background) if r_idx % 2 == 0 else (pal.get("row_b") or "#FFFFFF"))
+            draw.line([x0, y + rh, x1, y + rh], fill=pal.get("line") or "#E2E8F0", width=1)
             x = x0
             for c_idx, (lines, w) in enumerate(zip(lines_per_cell, col_ws)):
-                color = ctx.c.secondary if (c_idx == n_cols - 1 and n_cols > 2) else "#0F172A" if c_idx == 0 else \
-                    ("#334155" if n_cols > 2 else ctx.c.primary)
-                ty = y + pad
+                if pal:
+                    color = pal["accent"] if (c_idx == n_cols - 1 and n_cols > 2) else pal["ink"] if c_idx == 0 else pal["text"]
+                else:
+                    color = ctx.c.secondary if (c_idx == n_cols - 1 and n_cols > 2) else "#0F172A" if c_idx == 0 else \
+                        ("#334155" if n_cols > 2 else ctx.c.primary)
+                ty = y + pad + extra // 2
                 for line in lines:
                     draw.text((x + pad, ty), line, font=bold if c_idx == 0 else font, fill=color)
                     ty += lh

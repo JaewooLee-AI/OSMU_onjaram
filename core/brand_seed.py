@@ -35,6 +35,29 @@ BRAND_COLORS = {
     "text_muted": "#6E7378",   # 뮤트 그레이 — 캡션
 }
 
+# 카드·쇼츠 디자인 토큰(cards/tokens.py가 읽음). 색 이름은 다른 고객사 코드와 맞춘 것이라 뜻으로 읽습니다:
+# navy = 밝은 면 위 진한 글자·대체 어두운 바탕, gold = 보조 포인트(세이지), ivory = 어두운 면 위 글자.
+# 진한·옅은 값은 브랜드 색을 어둡게/밝게 한 파생색입니다(문서에 없는 값 — 필요하면 조정).
+CARD_TOKENS = {
+    "colors": {
+        "navy": "#24282B", "navy_deep": "#181B1D",
+        "gold": BRAND_COLORS["primary"], "gold_light": "#B9D1BF",
+        "ivory": BRAND_COLORS["bg"], "ivory_text": "#EFEBE4", "ivory_dim": "#DAD5CB",
+        "sand_mix": "#D4CAA8",          # 크림 바탕에 26% 섞으면 소프트 오트(#F0ECE1)
+        "charcoal": BRAND_COLORS["text"],
+    },
+    "kickers": {   # 카드 종류별 머리말 배지(빈 값이면 배지 없음)
+        "cover": "", "body": "", "single": "", "checklist": "마음 체크", "steps": "오늘의 실천",
+        "numbered": "핵심 정리", "howto": "이렇게 해 보세요", "qa": "묻고 답하기", "big_number": "숫자로 보기",
+        "event_info": "안내", "comparison_table": "한눈에 비교", "call_to_action": "함께 걸어요", "quote": "마음에 남는 말",
+    },
+    "copy": {
+        "cover_label": "", "band_tag": "ONJARAM", "band_tag_shorts": "ONJARAM", "shorts_badge": "온자람",
+        "qr_caption": "QR을 찍으면 상담 안내로 연결됩니다", "cta_tag": "상담 문의",
+        "next": "넘겨 보기 →", "phone_prefix": "상담", "phone_prefix_report": "상담",
+    },
+}
+
 BRAND_NAME = "주식회사 온자람"
 SUB_BRAND = "온자람심리상담센터"
 HOMEPAGE = ""

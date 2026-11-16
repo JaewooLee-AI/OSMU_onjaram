@@ -78,9 +78,18 @@ def _extract_json(raw: str) -> dict:
 
 # --- 규칙 기반 대체 -----------------------------------------------------------
 
+_SKIP_LINE_RE = re.compile(r"^\s*(?:\[IMAGE:|안녕하세요[,，]|---+\s*$)")
+
+
 def _split_source(source: str) -> List[str]:
+    """원고 → 문장 목록. 블로그 본문이 원고일 때 섞여 있는 것(고정 인사·사진 자리 [IMAGE:]·구분선)은 빼고,
+    ## 소제목·> 인용·**굵게** 같은 서식 표시는 글자만 남긴다(규칙 기반 기획이 인사말을 표지 제목으로 쓰던 문제)."""
     parts = []
     for line in (source or "").replace("\\n", "\n").splitlines():
+        if _SKIP_LINE_RE.match(line):
+            continue
+        line = re.sub(r"^\s*(?:#{1,6}|>)\s*", "", line)
+        line = line.replace("**", "").replace("==", "")
         line = re.sub(r"^\s*(?:[-•·*]|\d+[.)]|[QA]\d*[.)]?)\s*", "", line.strip())
         line = card_types.PLACEHOLDER_RE.sub("", line).strip()
         if not line:

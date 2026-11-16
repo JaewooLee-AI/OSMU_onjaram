@@ -24,6 +24,7 @@ _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 COLOR_KEYS = ("bg", "fg", "accent")
 SCALE_KEYS = ("title_scale", "body_scale", "takeaway_scale")
 SCALE_RANGE = (0.6, 2.0)
+TAKEAWAY_MODES = ("bar", "line", "none")   # 아래 요약 한 줄 모양: 진한 띠 | 가는 줄 | 없음
 
 
 def _clean_style(raw: Any) -> Dict[str, Any]:
@@ -33,6 +34,8 @@ def _clean_style(raw: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {}
     if raw.get("reset"):
         out["reset"] = True
+    if raw.get("takeaway") in TAKEAWAY_MODES:
+        out["takeaway"] = raw["takeaway"]
     for k in COLOR_KEYS:
         v = raw.get(k)
         if isinstance(v, str) and _HEX_RE.match(v.strip()):
@@ -65,7 +68,7 @@ def _prompt(sb: EditableStoryboard, index: int, instruction: str, kit: dict) -> 
         "요청이 글에 관한 것이면 image_prompt는 넣지 마세요.\n"
         "요청이 카드 모양(배경색·글자색·강조색·글자 크기)에 관한 것이면 style에 넣으세요: bg·fg·accent는 반드시 #RRGGBB(색 이름은 "
         "차분하고 글자가 잘 읽히는 대비의 색으로 바꾸세요), title_scale·body_scale·takeaway_scale는 '현재 모양' 값(없으면 1)에 곱한 0.6~2.0 "
-        "사이 숫자(\"크게\"=약 1.2배, \"2배\"=2.0, \"작게\"=약 0.85배). 가운데 칸의 목록·본문 글자는 body_scale, 위 제목은 title_scale, 아래 한 줄은 takeaway_scale입니다. \"원래대로\"면 style에 {\"reset\": true}. 요청이 \"모든 카드·전체\"에 관한 것이면 "
+        "사이 숫자(\"크게\"=약 1.2배, \"2배\"=2.0, \"작게\"=약 0.85배). 가운데 칸의 목록·본문 글자는 body_scale, 위 제목은 title_scale, 아래 한 줄은 takeaway_scale입니다. 아래 요약 한 줄의 모양은 takeaway에 \"bar\"(진한 띠)·\"line\"(가는 줄)·\"none\"(빼기) 중 하나. \"원래대로\"면 style에 {\"reset\": true}. 요청이 \"모든 카드·전체\"에 관한 것이면 "
         'scope에 "all"을, 아니면 "card"를 넣으세요.\n'
         '반드시 JSON만 출력: {"lead_headline": "...", "body_content": "...", "takeaway": "...", "image_prompt": "...", '
         '"style": {"bg": "#RRGGBB", "fg": "#RRGGBB", "title_scale": 1.2}, "scope": "card"} (바꿀 칸만 넣으면 됩니다)'

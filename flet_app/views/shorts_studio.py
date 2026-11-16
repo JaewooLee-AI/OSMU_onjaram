@@ -94,16 +94,17 @@ TRANSITION_OPTIONS = {
 
 
 def render_video(campaign_id: str, sb, voice: str, frame_style: str, progress=None, tts_call=None,
-                 photo_motion: str = "none", text_motion: str = "none", transition: str = "none") -> str:
+                 photo_motion: str = "none", text_motion: str = "none", transition: str = "none", video_layout: str = "band", video_speed: str = "auto") -> str:
     """쇼츠 MP4를 만들어 경로를 글에 저장합니다(이전 파일은 새 파일로 교체)."""
     out_dir = os.path.join(EXPORTS_DIR, "shorts", campaign_id)
     os.makedirs(out_dir, exist_ok=True)
     renderer = ShortsRendererService(export_dir=out_dir)
     path = asyncio.run(renderer.render_shorts_video(
         sb, progress_callback=progress, options=ShortsOptions(frame_style=frame_style, voice=voice, tts_call=tts_call, photo_motion=photo_motion,
-                                text_motion=text_motion, transition=transition)))
+                                text_motion=text_motion, transition=transition, video_layout=video_layout, video_speed=video_speed)))
     repo.update_campaign(campaign_id, shorts_video_path=path)
-    return path + (("\n⚠️ " + " / ".join(renderer.last_warnings)) if renderer.last_warnings else "")
+    return (path + "".join(f"\nℹ️ {n}" for n in renderer.last_notes)
+            + (("\n⚠️ " + " / ".join(renderer.last_warnings)) if renderer.last_warnings else ""))
 
 
 def build_shorts_tab(page: ft.Page, campaign: dict, scale: float, reload=None) -> ft.Control:

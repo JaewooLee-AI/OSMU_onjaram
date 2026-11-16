@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
@@ -88,6 +89,54 @@ def save_upload(raw: bytes, original_filename: str) -> str:
         height=height,
         byte_size=len(data),
     )
+    return rel_path
+
+
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".m4v"}
+MAX_VIDEO_MB = 300     # 올릴 수 있는 동영상 한 편의 크기(휴대폰 1~2분 영상 기준). 넘으면 잘라서 올리라고 안내한다.
+
+
+class VideoTooLarge(ValueError):
+    pass
+
+
+def is_video(name: str) -> bool:
+    return Path(name or "").suffix.lower() in VIDEO_EXTS
+
+
+def save_video(original_filename: str, src_path: Optional[str] = None, raw: Optional[bytes] = None) -> str:
+    """동영상을 저장하고 rel_path를 돌려준다. 데스크톱은 src_path(파일을 조금씩 읽어 복사 — 메모리에 통째로 올리지 않음),
+    브라우저 실행은 raw. 같은 내용이면 이미 있는 파일을 돌려준다. MAX_VIDEO_MB를 넘으면 VideoTooLarge."""
+    import shutil
+    limit = MAX_VIDEO_MB * 1024 * 1024
+    h = hashlib.sha256()
+    if src_path:
+        size = os.path.getsize(src_path)
+        if size > limit:
+            raise VideoTooLarge(f"{size / 1024 / 1024:.0f}MB")
+        with open(src_path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    elif raw is not None:
+        size = len(raw)
+        if size > limit:
+            raise VideoTooLarge(f"{size / 1024 / 1024:.0f}MB")
+        h.update(raw)
+    else:
+        raise ValueError("동영상 내용이 없습니다")
+    digest = h.hexdigest()
+    existing = repo.find_asset_by_sha256(digest)
+    if existing and (ASSETS_DIR / existing["rel_path"]).exists():
+        return existing["rel_path"]
+    ext = Path(original_filename).suffix.lower() or ".mp4"
+    rel_path = f"{datetime.now().strftime('%Y%m')}/{digest[:16]}{ext}"
+    target = ASSETS_DIR / rel_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if src_path:
+        shutil.copyfile(src_path, target)
+    else:
+        target.write_bytes(raw)
+    repo.register_asset(rel_path=rel_path, filename=original_filename, sha256=digest, width=0, height=0, byte_size=size)
     return rel_path
 
 

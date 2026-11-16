@@ -97,7 +97,7 @@ def test_editorial_shorts_caption_rows_and_photo_slot_motion(tmp_path, design):
     p2 = _pic(tmp_path / "p2.png", "#F3E2DA", "#E07A5F")
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
     mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
-        frame_style="tri", tts_call=_fake_tts, photo_motion="zoom_in", text_motion="slide",
+        frame_style="tri", tts_call=_fake_tts, photo_motion="zoom_in", text_motion="slide", video_layout="card",
         media_overrides={1: shorts_ed.SceneMedia("image_pair", [sb.assets[0].path, p2])})))
     assert not renderer.last_warnings, renderer.last_warnings
     # 첫 장면(표지): 사진 칸은 움직이고 머리줄·제목은 그대로
@@ -125,7 +125,7 @@ def test_ed_segment_falls_back_to_still_photo_when_media_fails(tmp_path):
     bad.write_bytes(b"not a video")
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
     mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
-        frame_style="tri", tts_call=_fake_tts, media_overrides={0: shorts_ed.SceneMedia("video", [str(bad)])})))
+        frame_style="tri", tts_call=_fake_tts, video_layout="card", media_overrides={0: shorts_ed.SceneMedia("video", [str(bad)])})))
     assert any("정지 사진" in w for w in renderer.last_warnings)
     assert _grab(mp4, 0.5, tmp_path / "x.png").size == (1080, 1920)
 

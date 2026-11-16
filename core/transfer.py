@@ -56,7 +56,7 @@ PARTS = {
     "cost_settings": "AI 비용 설정 — 모델 단가·환율·월 예산",
     "keyword_cache": "키워드 측정값 — 검색량·경쟁도 (받는 PC에서 다시 재지 않아도 됨)",
     "title_history": "제목 이력 — 같은 블로그에 겹치는 제목을 피하는 데 씀",
-    "work": "작업 내용 — 글(본문·서식·카드뉴스·쇼츠 대본·게시 기록)·올린 사진·사진 분석 결과·카드 그림(AI 이미지 포함)·쇼츠 영상",
+    "work": "작업 내용 — 글(본문·서식·카드뉴스·쇼츠 대본·게시 기록)·올린 사진·사진 분석 결과·카드 그림(AI 이미지 포함)·쇼츠 영상 (올린 동영상 원본은 크기 때문에 빠짐)",
 }
 
 # app_state 중 옮기는 키와 그 키가 속한 항목. 나머지 키(키워드 화면 진행 상태 sweep:{킷 ID}·
@@ -197,6 +197,10 @@ def _rebase(path: Optional[str], src_root: str, dst_root: Path) -> Optional[str]
     return str(dst_root.joinpath(*a[len(b) + 1:].split("/")))
 
 
+def _is_video(rel: str) -> bool:
+    return Path(rel or "").suffix.lower() in (".mp4", ".mov", ".webm", ".m4v")
+
+
 def _work_files(campaigns: List[dict], assets: List[dict]) -> Dict[str, str]:
     """옮길 파일들(데이터 폴더 기준 상대 경로 → 내용 base64): 올린 사진, 카드 그림(PNG)·AI 이미지, 쇼츠 영상."""
     paths: Dict[str, Path] = {}
@@ -206,10 +210,12 @@ def _work_files(campaigns: List[dict], assets: List[dict]) -> Dict[str, str]:
             paths[_rel(p)] = p
 
     for a in assets:
-        add(_under_data(str(ASSETS_DIR / a["rel_path"])))
+        if not _is_video(a["rel_path"]):
+            add(_under_data(str(ASSETS_DIR / a["rel_path"])))
     for c in campaigns:
         for rel in list(c.get("storage_file_paths") or []) + list(c.get("card_photo_paths") or []):
-            add(_under_data(str(ASSETS_DIR / rel)))
+            if not _is_video(rel):      # 올린 동영상은 크기 때문에 옮기지 않는다(받는 PC에서 다시 올림)
+                add(_under_data(str(ASSETS_DIR / rel)))
         card_dir = c.get("card_export_dir")
         if card_dir and Path(card_dir).is_dir():
             for f in Path(card_dir).glob("slide_*.png"):
@@ -245,10 +251,12 @@ def _work_size_mb() -> float:
             seen.add(p)
             total += p.stat().st_size
     for a in assets:
-        add(_under_data(str(ASSETS_DIR / a["rel_path"])))
+        if not _is_video(a["rel_path"]):
+            add(_under_data(str(ASSETS_DIR / a["rel_path"])))
     for c in campaigns:
         for rel in list(c.get("storage_file_paths") or []) + list(c.get("card_photo_paths") or []):
-            add(_under_data(str(ASSETS_DIR / rel)))
+            if not _is_video(rel):      # 올린 동영상은 크기 때문에 옮기지 않는다(받는 PC에서 다시 올림)
+                add(_under_data(str(ASSETS_DIR / rel)))
         if c.get("card_export_dir") and Path(c["card_export_dir"]).is_dir():
             for f in Path(c["card_export_dir"]).glob("slide_*.png"):
                 add(_under_data(str(f)))

@@ -17,7 +17,7 @@ import flet as ft
 from flet_app.save_dialog import is_web, save_bytes, zip_files
 
 from cards.schema import CARD_ASPECT_LABELS, CARD_ASPECTS
-from cards import card_types, design_templates, edit as card_edit, ffmpeg_tools, images, preview, shorts_script, tts
+from cards import card_types, design_templates, edit as card_edit, ffmpeg_tools, images, preview, shorts_ed, shorts_script, tts
 from cards.paths import EXPORTS_DIR
 from core import repo, storage
 
@@ -25,8 +25,9 @@ from flet_app import outputs
 from flet_app.components.collapsible import collapsible
 from flet_app.state import AppState
 from flet_app.theme import BRAND_COLORS, fs
+from flet_app.dialogs import confirm
 from flet_app.views.card_studio import (
-    _asset_label, _assets_of, _existing_paths, blog_only_extras, load_storyboard, move_to_card_only, open_folder, render_one,
+    _asset_label, _assets_of, _existing_paths, blog_only_extras, clip_note, load_storyboard, move_to_card_only, open_folder, render_one,
     render_storyboard,
     save_storyboard, stale_cards, sync_assets,
 )
@@ -270,6 +271,56 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         draw()
         say(msg)
 
+    VIDEO_NOTICE = ("동영상은 쇼츠의 사진 칸에 들어갑니다(원래 소리는 쓰지 않고 내레이션만 나옵니다).\n\n"
+                    "올리기 전에 확인하세요.\n"
+                    "· 내담자가 나오거나 내담자를 알아볼 수 있는 영상은 쓰지 않습니다.\n"
+                    "· 얼굴·이름표·차량 번호판이 보이는 사람에게 게시 동의를 받았습니다.\n"
+                    f"· 한 편은 {storage.MAX_VIDEO_MB}MB까지 올릴 수 있습니다.")
+
+    async def pick_videos() -> None:
+        web = bool(getattr(page, "web", False))        # 브라우저 실행은 파일 경로가 없어 내용을 받아야 한다
+        files = await ft.FilePicker().pick_files(
+            allow_multiple=True, with_data=web, file_type=ft.FilePickerFileType.CUSTOM,
+            allowed_extensions=[e.lstrip(".") for e in sorted(storage.VIDEO_EXTS)],
+        )
+        if not files:
+            return
+        current = repo.get_campaign(S["cid"]) or {}
+        paths = list(current.get("card_photo_paths") or [])
+        added, problems = 0, []
+        for f in files:
+            src = getattr(f, "path", None)
+            try:
+                if src and os.path.isfile(src):
+                    rel = storage.save_video(f.name, src_path=src)
+                elif f.bytes:
+                    rel = storage.save_video(f.name, raw=f.bytes)
+                else:
+                    problems.append(f"{f.name}: 파일을 읽지 못했습니다")
+                    continue
+            except storage.VideoTooLarge as exc:
+                problems.append(f"{f.name}: {exc} — {storage.MAX_VIDEO_MB}MB를 넘습니다. 필요한 부분만 잘라서 올려 주세요")
+                continue
+            except OSError as exc:
+                problems.append(f"{f.name}: 저장하지 못했습니다({type(exc).__name__})")
+                continue
+            if rel not in paths:
+                paths.append(rel)
+                added += 1
+        if added:
+            repo.update_campaign(S["cid"], card_photo_paths=paths)
+            reload_state()
+            if S["sb"] is not None:
+                sync_assets(S["sb"], S["campaign"])
+                save_storyboard(S["cid"], S["sb"])
+        draw()
+        msg = (f"✅ 동영상 {added}편을 올렸습니다. ③ 쇼츠의 대본에서 장면마다 고르거나 [올린 동영상을 장면에 이어 넣기]를 누르세요."
+               if added else "새로 올린 동영상이 없습니다.")
+        say(msg + "".join(f"\n⚠️ {p}" for p in problems), ok=bool(added) and not problems)
+
+    def on_pick_videos(e: ft.Event) -> None:
+        confirm(page, "쇼츠용 동영상 올리기", VIDEO_NOTICE, lambda: page.run_task(pick_videos), ok_label="확인하고 올리기", danger=False)
+
     def offer_ai_fill() -> None:
         """3단 카드의 가운데는 사진 칸입니다. 비어 있는 사진 칸이 있으면 바로 채울 방법을 묻습니다(AI는 비용 확인 후에만)."""
         sb = S["sb"]
@@ -316,7 +367,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                              f"{len(images.photo_slot_indexes(sb))}장뿐입니다. 나머지 사진은 ② 다듬기의 '사진'에서 카드마다 골라 넣거나, "
                              "카드 장수를 늘려 보세요.")
             return f"✅ 카드 {len(paths)}장을 만들었습니다. 왼쪽에서 확인하고, 고칠 곳은 아래 ② 다듬기에서 고치세요." + \
-                   (f" (⚠️ {len(warn)}건 확인 필요)" if warn else "") + photo_msg
+                   (f" (⚠️ {len(warn)}건 확인 필요)" if warn else "") + photo_msg + clip_note(S["cid"])
 
         if S["sb"] is not None:
             def go(ev: ft.Event) -> None:
@@ -335,6 +386,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     section_a = _section("카드 만들기", "①", ft.Row([type_dd, design_dd, palette_dd, aspect_dd, ft.OutlinedButton("미리보기", icon=ft.Icons.IMAGE_OUTLINED, on_click=on_preview)],
                                                    spacing=8, wrap=True), aspect_note,
                          type_hint, extras_box, ft.Row([count_dd, ft.OutlinedButton("카드용 사진 올리기", icon=ft.Icons.ADD_PHOTO_ALTERNATE, on_click=on_pick_photos),
+                                                         ft.OutlinedButton("쇼츠용 동영상 올리기", icon=ft.Icons.VIDEO_CALL, on_click=on_pick_videos),
                                             photo_note], spacing=10, wrap=True, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                          *collapsible("⚙️ 고급 설정 (이미지 모드 · AI 기획 · 원고 직접 넣기)", ft.Column([mode_dd, ai_switch, source_field], spacing=8)),
                          make_button, note)
@@ -439,7 +491,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     def redraw_all() -> None:
         apply_edits()
         run_job("카드를 다시 그리는 중입니다",
-                lambda progress: f"✅ 카드 {len(render_storyboard(S['cid'], S['sb']))}장을 다시 그렸습니다.")
+                lambda progress: f"✅ 카드 {len(render_storyboard(S['cid'], S['sb']))}장을 다시 그렸습니다." + clip_note(S["cid"]))
 
     def on_request(instruction: str) -> None:
         """말로 카드 한 장 고치기: 글 모델이 바꿀 칸만 돌려주고, 그림 요청이면 새 장면 설명을 넣은 뒤 비용 확인으로 이어간다."""
@@ -470,14 +522,14 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             if r["image_changed"]:
                 S["pending_image"] = i
                 msg += " 새 그림은 아래 확인 창에서 만들 수 있습니다."
-            return msg + "".join(f"\n⚠️ {w}" for w in r["warnings"])
+            return msg + "".join(f"\n⚠️ {w}" for w in r["warnings"]) + clip_note(S["cid"], None if r.get("style_scope") == "all" else i)
 
         run_job("요청을 처리하는 중입니다", job, after=lambda: S.get("pending_image") is not None and confirm_ai([S["pending_image"]]))
 
     def on_apply(e: ft.Event) -> None:
         apply_edits()
         i = S["idx"]
-        run_job(f"{i + 1}번 카드를 다시 그리는 중", lambda progress: (render_one(S["cid"], S["sb"], i), f"✅ {i + 1}번 카드를 다시 그렸습니다.")[1])
+        run_job(f"{i + 1}번 카드를 다시 그리는 중", lambda progress: (render_one(S["cid"], S["sb"], i), f"✅ {i + 1}번 카드를 다시 그렸습니다." + clip_note(S["cid"], i))[1])
 
     def confirm_ai(only: list[int] | None) -> None:
         sb = S["sb"]
@@ -579,10 +631,10 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                         size=fs(10, scale), color=BRAND_COLORS["text_muted"]),
             ], spacing=8, wrap=True)
             extra.extend([promo, qr_row, qr_cap])
-            if not design_templates.get(sb.design_id).layout == "oj":
-                extra.append(ft.Text("배지·QR은 '온자람' 디자인에서 그려집니다. 다른 디자인에서는 보이지 않습니다.",
+            if design_templates.get(sb.design_id).layout not in ("oj", "ed", "rp"):
+                extra.append(ft.Text("배지·QR은 온자람 디자인(에디토리얼·리포트)에서 그려집니다. 다른 디자인에서는 보이지 않습니다.",
                                      size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
-        req = ft.TextField(label="말로 고치기 — 예: 제목을 더 짧게 / 이미지를 숲 느낌으로 / 배경을 연한 파란색으로 / 모든 카드 글자를 크게", multiline=True,
+        req = ft.TextField(label="말로 고치기", helper="예: 제목을 더 짧게 / 이미지를 숲 느낌으로 / 배경을 연한 파란색으로 / 모든 카드 글자를 크게", multiline=True,
                            min_lines=1, max_lines=3, dense=True)
         req_btn = ft.FilledButton("요청 실행", icon=ft.Icons.AUTO_AWESOME, disabled=not outputs.has_ai_planner(),
                                   on_click=lambda e: on_request(req.value or ""))
@@ -609,6 +661,23 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
     transition_dd = ft.Dropdown(label="장면 전환", width=220, dense=True, value="auto",
                                 options=[ft.DropdownOption(key=k, text=v) for k, v in TRANSITION_OPTIONS.items()])
     short_ai = ft.Switch(label="AI로 내레이션 다듬기", value=False)
+    LAYOUT_NOTE = {
+        "band": "위 띠에 시리즈 이름과 제목, 가운데 영상 창, 아래 띠에 지금 읽는 문장(큰 자막)이 나옵니다. 올린 영상은 장면 순서대로 이어서 재생되고(없으면 사진이 확대·축소로 움직임), "
+                "영상 전체가 보이도록 맞추고 양옆은 같은 영상을 흐리게 깝니다. 특정 장면만 다른 영상·사진을 쓰려면 아래 대본에서 고르세요. "
+                "단계·체크·안내·숫자 장면은 아래 띠에 내용 패널이 음성에 맞춰 나타나고(자막은 생략), 비교표는 카드 모양입니다.",
+        "full": "올린 영상(없으면 사진)을 화면 전체에 깔고 위에 시리즈 이름과 제목, 아래에 자막을 얹습니다. 단계·체크·안내·숫자 장면은 영상 위 반투명 패널로 나옵니다. 비교표는 카드 모양입니다.",
+        "card": "예전 모양: 카드 디자인을 그대로 9:16으로 그리고 사진 칸 안에서만 사진·영상이 움직입니다. 목록 칸이 음성에 맞춰 하나씩 나타납니다.",
+    }
+    layout_dd = ft.Dropdown(label="쇼츠 모양", width=340, dense=True, value="band",
+                            options=[ft.DropdownOption(key="band", text="영상 띠 모양 (위 제목·가운데 영상·아래 자막) — 권장"),
+                                     ft.DropdownOption(key="full", text="영상 전체 화면 (영상 위에 글자)"),
+                                     ft.DropdownOption(key="card", text="카드 모양 (예전, 텍스트 기반)")],
+                            on_select=lambda e: (setattr(layout_note, "value", LAYOUT_NOTE[layout_dd.value or "band"]), _u(layout_note)))
+    layout_note = ft.Text("", size=fs(10, scale), color=BRAND_COLORS["text_muted"])
+    speed_dd = ft.Dropdown(label="동영상 재생 속도", width=250, dense=True, value="auto",
+                           options=[ft.DropdownOption(key="auto", text="자동 (짧으면 천천히)"), ft.DropdownOption(key="0.5", text="0.5배 (느리게)"),
+                                    ft.DropdownOption(key="0.75", text="0.75배"), ft.DropdownOption(key="1", text="1배 (보통)"),
+                                    ft.DropdownOption(key="1.5", text="1.5배"), ft.DropdownOption(key="2", text="2배 (빠르게)")])
     scene_refs: list = []
 
     def apply_scenes(mark_fresh: bool = True) -> None:
@@ -616,13 +685,32 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         sb = S["sb"]
         if sb is None:
             return
-        for scene, cap, nar in scene_refs:
+        for scene, cap, nar, media_dd, start_tf in scene_refs:
             scene.display_caption, scene.narration_script = cap.value or "", nar.value or ""
+            scene.asset_id = media_dd.value or None
+            try:
+                scene.clip_start = max(0.0, float(start_tf.value or 0.0))
+            except ValueError:
+                scene.clip_start = 0.0
             scene.duration_seconds = max(shorts_script.MIN_SCENE_SEC, round(len(scene.narration_script) / shorts_script.CHARS_PER_SEC, 1))
         if scene_refs:
             if mark_fresh:
                 sb.shorts_source_hash = shorts_script.card_hash(sb)
             save_storyboard(S["cid"], sb)
+
+    def on_video_relay(e: ft.Event) -> None:
+        sb = S["sb"]
+        if sb is None:
+            return
+        apply_scenes(mark_fresh=False)
+        sync_assets(sb, S["campaign"])
+        count = shorts_ed.assign_video_relay(sb, overwrite=True)
+        if not count:
+            say("올린 동영상이 없습니다. ① 카드 만들기의 [쇼츠용 동영상 올리기]로 먼저 올려 주세요.", ok=False)
+            return
+        save_storyboard(S["cid"], sb)
+        draw()
+        say(f"✅ 올린 동영상을 {count}장면에 순서대로 이어 넣었습니다(장면 길이만큼씩 이어서). 대본에서 장면별 시작 초를 고칠 수 있습니다.")
 
     def on_script(e: ft.Event) -> None:
         apply_edits()
@@ -650,7 +738,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                 async def cb(pct: float, msg: str) -> None:
                     progress(msg)
                 result = render_video(S["cid"], S["sb"], voice_dd.value, "tri", progress=cb, photo_motion=motion_dd.value,
-                                      text_motion=text_motion_dd.value, transition=transition_dd.value)
+                                      text_motion=text_motion_dd.value, transition=transition_dd.value, video_layout=layout_dd.value or "band", video_speed=speed_dd.value or "auto")
                 return f"✅ 쇼츠 영상을 만들었습니다: {result}"
 
             run_job("쇼츠 영상을 만드는 중입니다 (수 분 걸릴 수 있어요)", job)
@@ -671,19 +759,34 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             items.append(ft.Text("⚠️ FFmpeg를 찾을 수 없어 영상을 만들 수 없습니다.", size=fs(11, scale), color="#B3261E"))
         items.append(ft.Row([seconds_dd, voice_dd, motion_dd, text_motion_dd, transition_dd], spacing=8, wrap=True))
         if design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout):
-            items.append(ft.Text("온자람 디자인 쇼츠: 지금 읽는 문장이 아래 큰 자막으로 나오고, 사진은 사진 칸 안에서만 움직이며, "
-                                 "목록 칸은 음성에 맞춰 하나씩 나타납니다('글자 움직임 없음'이면 처음부터 다 보임).",
-                                 size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
+            items.append(ft.Row([layout_dd, speed_dd], wrap=True))
+            layout_note.value = LAYOUT_NOTE[layout_dd.value or "band"]
+            items.append(layout_note)
         items.append(ft.Row([short_ai], wrap=True))
-        items.append(ft.FilledButton("카드에서 대본 만들기", icon=ft.Icons.AUTO_AWESOME, on_click=on_script))
+        videos = [a for a in sb.assets if a.kind == "video"]
+        native = design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout)
+        top_btns = [ft.FilledButton("카드에서 대본 만들기", icon=ft.Icons.AUTO_AWESOME, on_click=on_script)]
+        if videos and sb.shorts_scenes:
+            top_btns.append(ft.OutlinedButton("올린 동영상을 장면에 이어 넣기", icon=ft.Icons.THEATERS, on_click=on_video_relay,
+                                              tooltip="동영상 한 편을 1장면(0초~)·2장면(이어서)…처럼 모든 장면의 사진 칸에 차례로 넣습니다."))
+        items.append(ft.Row(top_btns, spacing=8, wrap=True))
+        if videos:
+            items.append(ft.Text(f"🎬 올린 동영상 {len(videos)}편 — 원래 소리는 쓰지 않습니다. 대본을 다시 만들면 장면별 미디어 지정은 지워집니다."
+                                 + ("" if native else " 지금 디자인은 사진 칸에 영상을 넣지 못합니다(온자람 에디토리얼·리포트 디자인에서 됩니다)."),
+                                 size=fs(10, scale), color=BRAND_COLORS["text_muted"]))
         if sb.shorts_scenes:
+            asset_opts = [ft.DropdownOption(key="", text="(자동: 올린 동영상 → 없으면 카드 사진)")] + [
+                ft.DropdownOption(key=a.id, text=_asset_label(a)) for a in sb.assets]
             rows = []
             for k, scene in enumerate(sb.shorts_scenes):
                 cap = ft.TextField(label=f"{k + 1}장면 · 화면 문구(30자)", value=scene.display_caption, dense=True)
                 nar = ft.TextField(label="내레이션 (소리 내어 읽습니다)", value=scene.narration_script, multiline=True, min_lines=2, max_lines=5, dense=True)
-                scene_refs.append((scene, cap, nar))
-                rows += [cap, nar]
-            items += collapsible(f"📝 대본 {len(sb.shorts_scenes)}장면 보기·고치기", ft.Column(rows, spacing=6))
+                picked = scene.asset_id if (scene.asset_id and sb.asset(scene.asset_id)) else ""
+                media_dd = ft.Dropdown(label="이 장면의 사진·동영상", width=300, dense=True, value=picked, options=asset_opts)
+                start_tf = ft.TextField(label="동영상 시작(초)", width=130, dense=True, value=f"{float(scene.clip_start or 0.0):g}")
+                scene_refs.append((scene, cap, nar, media_dd, start_tf))
+                rows += [cap, nar, ft.Row([media_dd, start_tf], spacing=8, wrap=True), ft.Divider(height=6)]
+            items += collapsible(f"📝 대본 {len(sb.shorts_scenes)}장면 보기·고치기 (장면별 사진·동영상)", ft.Column(rows, spacing=6))
             items.append(ft.Text("🔊 " + describe_voice_estimate(estimate_voice(sb)), size=fs(11, scale)))
             current = (repo.get_campaign(S["cid"]) or {}).get("shorts_video_path")
             btns = [ft.FilledButton("쇼츠 영상 만들기", icon=ft.Icons.MOVIE, on_click=on_video, disabled=not ffmpeg_tools.available())]

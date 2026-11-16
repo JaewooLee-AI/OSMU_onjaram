@@ -17,7 +17,7 @@ import flet as ft
 
 from flet_app.save_dialog import is_web, save_bytes, zip_files
 
-from cards import card_types, design_templates, images, preview
+from cards import card_types, design_templates, ffmpeg_tools, images, preview
 from cards.card_renderer import CardNewsRendererService
 from cards.director import plan_cards
 from cards.paths import EXPORTS_DIR
@@ -85,12 +85,15 @@ def move_to_card_only(campaign_id: str, paths: list[str]) -> int:
 
 
 def _assets_of(campaign: dict) -> list[MediaAsset]:
-    """글에 올려 둔 사진(블로그 + 카드 전용) → 카드에 쓸 에셋."""
+    """글에 올려 둔 사진·동영상(블로그 + 카드 전용) → 카드·쇼츠에 쓸 에셋. 동영상은 쇼츠 장면에서만 고른다."""
     out = []
     for i, rel in enumerate(card_photo_list(campaign), 1):
         path = str(storage.abs_path(rel))
         if os.path.exists(path):
-            out.append(MediaAsset(id=f"A{i}", kind="image", path=path, original_name=os.path.basename(rel)))
+            kind = "video" if storage.is_video(rel) else "image"
+            dur = ffmpeg_tools.probe_duration(path) if kind == "video" else 0.0
+            name = (repo.find_asset_by_rel_path(rel) or {}).get("filename") if kind == "video" else ""
+            out.append(MediaAsset(id=f"A{i}", kind=kind, path=path, duration=dur, original_name=name or os.path.basename(rel)))
     return out
 
 
@@ -112,11 +115,15 @@ def sync_assets(sb: EditableStoryboard, campaign: dict) -> None:
     for slide in sb.card_slides:
         if slide.asset_id in gone:
             slide.asset_id = None
+    for scene in sb.shorts_scenes:
+        if scene.asset_id in gone:
+            scene.asset_id = None
 
 
 def _asset_label(asset: MediaAsset) -> str:
-    kind = "내 사진" if asset.source == "user" else "AI 이미지"
-    return f"{kind} {asset.id}" + (f" · {asset.original_name}" if asset.original_name else "")
+    kind = ("내 동영상" if asset.kind == "video" else "내 사진") if asset.source == "user" else "AI 이미지"
+    dur = f" ({asset.duration:.0f}초)" if asset.kind == "video" and asset.duration > 0 else ""
+    return f"{kind} {asset.id}{dur}" + (f" · {asset.original_name}" if asset.original_name else "")
 
 
 def load_storyboard(campaign: dict) -> EditableStoryboard | None:
@@ -150,11 +157,27 @@ def stale_cards(sb: EditableStoryboard) -> list[int]:
             if i >= len(sb.render_hashes) or sb.render_hashes[i] != slide_fingerprint(sb, i)]
 
 
+# 마지막으로 그렸을 때 글자가 잘린 카드(글 id → {카드 번호: [잘린 글]}). 앱이 떠 있는 동안만 기억한다.
+LAST_CLIPS: dict = {}
+
+
+def clip_note(campaign_id: str, index: int | None = None) -> str:
+    """방금 그린 카드 가운데 글자가 잘린 것이 있으면 안내 한 줄(앞에 줄바꿈 포함), 없으면 빈 문자열."""
+    from cards import lint
+    clips = LAST_CLIPS.get(campaign_id) or {}
+    if index is not None:
+        clips = {index: clips.get(index) or []}
+    msg = lint.message(clips)
+    return f"\n{msg}" if msg else ""
+
+
 def render_storyboard(campaign_id: str, sb: EditableStoryboard) -> list[str]:
     """카드를 PNG로 그립니다. 이전 렌더링 폴더는 지우고 새 폴더(시각)에 씁니다(그림 캐시 문제 방지)."""
     base = os.path.join(EXPORTS_DIR, "cards", campaign_id)
     out = os.path.join(base, time.strftime("%Y%m%d-%H%M%S"))
-    paths = asyncio.run(CardNewsRendererService(export_dir=out).render_all_slides(sb))
+    service = CardNewsRendererService(export_dir=out)
+    paths = asyncio.run(service.render_all_slides(sb))
+    LAST_CLIPS[campaign_id] = dict(getattr(service, "clips", {}))
     for name in os.listdir(base):
         old = os.path.join(base, name)
         # 이전 렌더링 폴더(시각 이름)만 지운다 — AI 이미지가 있는 assets/ 등 다른 폴더는 절대 지우지 않는다.
@@ -176,7 +199,9 @@ def render_one(campaign_id: str, sb: EditableStoryboard, index: int) -> list[str
     base = os.path.dirname(old)
     out = os.path.join(base, time.strftime("%Y%m%d-%H%M%S") + "-r")
     shutil.copytree(old, out)
-    asyncio.run(CardNewsRendererService(export_dir=out).render_slide(sb, index))
+    service = CardNewsRendererService(export_dir=out)
+    asyncio.run(service.render_slide(sb, index))
+    LAST_CLIPS.setdefault(campaign_id, {})[index] = list(getattr(service, "clips", {}).get(index) or [])
     shutil.rmtree(old, ignore_errors=True)
     hashes = list(sb.render_hashes) + [""] * (len(sb.card_slides) - len(sb.render_hashes))
     hashes[index] = slide_fingerprint(sb, index)
