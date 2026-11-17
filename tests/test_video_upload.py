@@ -193,7 +193,7 @@ def test_full_frame_falls_back_to_card_when_video_is_unreadable(tmp_path):
     bad = tmp_path / "broken.mp4"
     bad.write_bytes(b"not a video")
     sb = _full_sb(tmp_path, str(bad))
-    renderer, mp4 = _render(sb, tmp_path)
+    renderer, mp4 = _render(sb, tmp_path, video_layout="full")
     assert any("카드 모양" in w for w in renderer.last_warnings), renderer.last_warnings
     assert _grab(mp4, 0.5, tmp_path / "x.png").size == (1080, 1920)
 
@@ -252,7 +252,7 @@ def test_panel_layers_make_one_distinct_picture_per_item(tmp_path):
     assert [y for _, _, y in layers] == sorted(y for _, _, y in layers) and layers[-1][2] + Image.open(layers[-1][0]).height <= 1394
 
 
-# --- 영상 띠 모양(기본): 위 띠 제목 + 가운데 영상 창(전체가 보이게) + 아래 띠 ---------------------------------------
+# --- 영상 띠 모양: 위 띠 제목 + 가운데 영상 창(전체가 보이게) + 아래 띠 ---------------------------------------
 def _band_sb(tmp_path, media_path, kind="video", design="editorial"):
     sb = _full_sb(tmp_path, media_path, kind=kind)
     sb.design_id = design
@@ -260,11 +260,10 @@ def _band_sb(tmp_path, media_path, kind="video", design="editorial"):
 
 
 @needs_ffmpeg
-def test_band_layout_is_default_and_shows_whole_portrait_video_between_bands(tmp_path):
+def test_band_layout_shows_whole_portrait_video_between_bands(tmp_path):
     from cards.design_templates import get
     sb = _band_sb(tmp_path, _bars(tmp_path / "p.mp4", 360, 640, 6))
-    assert ShortsOptions().video_layout == "band"
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_layout="band")
     assert not renderer.last_warnings, renderer.last_warnings
     a = _grab(mp4, 0.7, tmp_path / "a.png")
     pal = shorts_ed.full_palette(get("editorial"))
@@ -289,7 +288,7 @@ def test_band_layout_plays_video_in_the_window_for_every_scene(tmp_path):
     sb = _sb(tmp_path)
     sb.design_id = "report"
     sb.assets.append(MediaAsset(id="A9", kind="video", source="user", path=_clip(tmp_path / "m.mp4", 20), duration=20.0))
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_layout="band")
     dur = float(subprocess.run([ffmpeg_tools.ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", mp4],
                                capture_output=True, text=True).stdout)
     t = 0.0
@@ -307,7 +306,7 @@ def test_band_info_scene_puts_panels_in_the_bottom_band_instead_of_caption(tmp_p
     sb.assets.append(MediaAsset(id="A9", kind="video", source="user", path=_clip(tmp_path / "m.mp4", 20), duration=20.0))
     idx = next(i for i, s in enumerate(sb.shorts_scenes) if sb.card_slides[s.source_cards[0] - 1].slide_type == "checklist")
     t0 = sum(s.duration_seconds for s in sb.shorts_scenes[:idx])
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_layout="band")
     f = _grab(mp4, t0 + 1.4, tmp_path / "f.png")
     accent = [p for p in f.crop((56, 1100, 1024, 1760)).getdata() if p[0] > 200 and 90 < p[1] < 160 and p[2] < 130]
     assert len(accent) > 300                                                               # 아래 띠의 패널(체크 칸 코랄)
@@ -316,7 +315,7 @@ def test_band_info_scene_puts_panels_in_the_bottom_band_instead_of_caption(tmp_p
 @needs_ffmpeg
 def test_band_image_only_scene_keeps_zoom_in_the_window(tmp_path):
     sb = _band_sb(tmp_path, _pic(tmp_path / "img.png", "#D8E4D8", "#4A7C59"), kind="image")
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="zoom_in")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="zoom_in", video_layout="band")
     assert not renderer.last_warnings, renderer.last_warnings
     a, b = _grab(mp4, 0.3, tmp_path / "a.png"), _grab(mp4, 3.0, tmp_path / "b.png")
     assert _diff(a, b, (0, 800, 1080, 1040)) > 1500
@@ -346,7 +345,7 @@ def test_short_video_loops_instead_of_freezing_and_slow_auto_speed_is_reported(t
     sb = _sb(tmp_path)
     sb.design_id = "editorial"
     sb.assets.append(MediaAsset(id="A9", kind="video", source="user", path=_clip(tmp_path / "short.mp4", 3), duration=3.0))
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_speed="1")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_speed="1", video_layout="band")
     dur = float(subprocess.run([ffmpeg_tools.ffprobe(), "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", mp4],
                                capture_output=True, text=True).stdout)
     assert dur > 20                                                   # 영상(3초)보다 쇼츠가 훨씬 길다
@@ -354,7 +353,7 @@ def test_short_video_loops_instead_of_freezing_and_slow_auto_speed_is_reported(t
         a, b = _grab(mp4, t, tmp_path / f"a{k}.png"), _grab(mp4, t + 0.6, tmp_path / f"b{k}.png")
         assert _diff(a, b, (0, 800, 1080, 1040)) > 800, f"{t:.1f}초 근처에서 영상이 멈췄습니다"
     r2, _m = _render(_sb(tmp_path), tmp_path / "s", photo_motion="none", text_motion="none", video_speed="auto")
-    assert not r2.last_notes                                            # 영상이 없으면 속도 안내도 없다
+    assert not [n for n in r2.last_notes if "배 속도" in n]               # 영상이 없으면 속도 안내도 없다
     sb3 = _sb(tmp_path)
     sb3.design_id = "editorial"
     sb3.assets.append(MediaAsset(id="A9", kind="video", source="user", path=_clip(tmp_path / "short.mp4", 3), duration=3.0))
@@ -400,10 +399,10 @@ def test_band_scene_shows_kicker_and_takeaway_from_the_card(tmp_path):
     sb = _full_sb(tmp_path, _bars(tmp_path / "l.mp4", 640, 360, 6))
     card = sb.card_slides[sb.shorts_scenes[0].source_cards[0] - 1]
     card.takeaway = "잘 해내고 싶은 마음이 클수록 부담도 커져요"
-    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none")
+    renderer, mp4 = _render(sb, tmp_path, photo_motion="none", text_motion="none", video_layout="band")
     with_take = _grab(mp4, 0.8, tmp_path / "w.png")
     card.takeaway = ""
-    r2, mp4b = _render(sb, tmp_path / "n", photo_motion="none", text_motion="none")
+    r2, mp4b = _render(sb, tmp_path / "n", photo_motion="none", text_motion="none", video_layout="band")
     without = _grab(mp4b, 0.8, tmp_path / "o.png")
     def bars(im):      # 요약 한 줄 왼쪽의 코랄 세로 막대(x 56~65)
         return sum(1 for y in range(700, 1700) if im.getpixel((60, y))[0] > 200 and 90 < im.getpixel((60, y))[1] < 160 and im.getpixel((60, y))[2] < 130)
@@ -432,6 +431,8 @@ def test_list_scene_shows_every_item_from_the_start_and_moves_the_highlight(tmp_
     from cards.schema import MediaAsset
     sb = _sb(tmp_path)
     sb.design_id = "editorial"
+    from cards import shorts_script        # 스튜디오처럼: 글자 중심이 아닌 모양은 목표 길이에 맞춘 대본
+    shorts_script.apply_to_storyboard(sb, shorts_script.convert(sb, seconds=20, follow_screen=False)[0])
     sb.assets.append(MediaAsset(id="A9", kind="video", source="user", path=_clip(tmp_path / "m.mp4", 20), duration=20.0))
     idx = next(i for i, s in enumerate(sb.shorts_scenes) if sb.card_slides[s.source_cards[0] - 1].slide_type == "checklist")
     scene = sb.shorts_scenes[idx]

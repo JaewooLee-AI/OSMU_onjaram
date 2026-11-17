@@ -1791,6 +1791,88 @@ def _naver_format_controls(scale: float) -> list[ft.Control]:
     ]
 
 
+def _music_controls(scale: float) -> list:
+    """🎵 쇼츠 배경 음악 — 기본 음원·크기를 고르고, 사용자가 음원을 데이터 폴더 music/에 추가·삭제합니다."""
+    import os
+    from cards import bgm
+    status = ft.Text("", size=fs(12, scale))
+    cur = outputs.default_music()
+    track_dd = ft.Dropdown(label="기본 배경 음악", width=360, dense=True)
+    vol_dd = ft.Dropdown(label="음악 크기", width=160, dense=True, value=cur["volume"],
+                         options=[ft.DropdownOption(key=k, text=v) for k, v in bgm.VOLUME_LABELS.items()])
+    user_list = ft.Column(spacing=2)
+
+    def say(msg: str, ok: bool = True) -> None:
+        status.value, status.color = msg, ("#1B6E3C" if ok else "#B3261E")
+        status.update()
+
+    def refill(selected: str) -> None:
+        tracks = bgm.tracks()
+        track_dd.options = [ft.DropdownOption(key="", text="음악 없음")] + [ft.DropdownOption(key=t["id"], text=bgm.label(t)) for t in tracks]
+        track_dd.value = selected if any(t["id"] == selected for t in tracks) else ""
+        user_list.controls = [
+            ft.Row([ft.Text("🎵 " + t["name"], size=fs(12, scale), expand=True),
+                    ft.TextButton("지우기", icon=ft.Icons.DELETE_OUTLINE, on_click=lambda e, tid=t["id"]: on_remove(tid))])
+            for t in tracks if t["kind"] == "user"] or [ft.Text("내가 넣은 음원이 없습니다.", size=fs(11, scale), color=BRAND_COLORS["text_muted"])]
+
+    def on_remove(tid: str) -> None:
+        bgm.remove_user_track(tid)
+        refill("" if track_dd.value == tid else (track_dd.value or ""))
+        if not track_dd.value:
+            outputs.save_default_music("", vol_dd.value or "mid")
+        track_dd.update()
+        user_list.update()
+        say("음원을 지웠습니다.")
+
+    async def on_add(e: ft.Event) -> None:
+        files = await ft.FilePicker().pick_files(allow_multiple=True, with_data=bool(getattr(e.page, "web", False)),
+                                                 file_type=ft.FilePickerFileType.CUSTOM, allowed_extensions=[x.lstrip(".") for x in bgm.EXTS])
+        if not files:
+            return
+        added, problems, last = 0, [], track_dd.value or ""
+        for f in files:
+            src = getattr(f, "path", None)
+            try:
+                if src and os.path.isfile(src):
+                    last = bgm.add_user_track(src)["id"]
+                elif f.bytes:
+                    import tempfile
+                    tmp = os.path.join(tempfile.mkdtemp(), os.path.basename(f.name))
+                    with open(tmp, "wb") as fh:
+                        fh.write(f.bytes)
+                    last = bgm.add_user_track(tmp)["id"]
+                else:
+                    problems.append(f"{f.name}: 파일을 읽지 못했습니다")
+                    continue
+                added += 1
+            except (ValueError, OSError) as exc:
+                problems.append(f"{f.name}: {exc}")
+        refill(last)
+        track_dd.update()
+        user_list.update()
+        say((f"✅ 음원 {added}곡을 넣었습니다. [배경 음악 저장]을 누르면 기본으로 쓰입니다." if added else "넣은 음원이 없습니다.")
+            + "".join(f"\n⚠️ {p}" for p in problems), ok=bool(added))
+
+    def on_save(e: ft.Event) -> None:
+        outputs.save_default_music(track_dd.value or "", vol_dd.value or "mid")
+        say("✅ 저장했습니다 — 카드·쇼츠 화면의 '배경 음악' 처음 값이 됩니다(쇼츠마다 바꿀 수 있습니다).")
+
+    refill(cur["track"])
+    return [
+        ft.Text("🎵 쇼츠 배경 음악", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
+        ft.Text("말하는 동안에는 음악이 자동으로 작아지고, 말이 쉬는 곳에서 다시 커집니다. 음악은 쇼츠 길이만큼 반복되고 끝에서 서서히 줄어듭니다.\n"
+                "음원은 라이선스를 확인한 것만 넣으세요(유튜브 오디오 보관함처럼 상업적 사용이 허용된 무료 음원 등). "
+                "넣은 음원은 이 PC의 데이터 폴더(music)에만 저장되고 📦 데이터 옮기기에는 들어가지 않으므로, 다른 PC에서는 다시 추가하세요.",
+                size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
+        ft.Row([track_dd, vol_dd], spacing=8, wrap=True),
+        ft.Row([ft.OutlinedButton("배경 음악 추가", icon=ft.Icons.LIBRARY_MUSIC, on_click=on_add),
+                ft.FilledButton("배경 음악 저장", on_click=on_save)], spacing=8, wrap=True),
+        ft.Text("내가 넣은 음원", size=fs(12, scale), weight=ft.FontWeight.W_600),
+        user_list,
+        status,
+    ]
+
+
 def _build_channels_tab(scale: float) -> ft.Control:
     """📣 생성 채널 — 기본으로 만들 것(블로그·카드뉴스·쇼츠)과 블로그와 함께 만들 SNS 글을 고릅니다.
 
@@ -1838,6 +1920,8 @@ def _build_channels_tab(scale: float) -> ft.Control:
                     size=fs(11, scale), color=BRAND_COLORS["text_muted"]),
             ft.FilledButton("기본 생성 대상 저장", on_click=on_save_outputs),
             out_status,
+            ft.Divider(),
+            *_music_controls(scale),
             ft.Divider(),
             ft.Text("블로그와 함께 만들 SNS 글", weight=ft.FontWeight.BOLD, size=fs(14, scale)),
             ft.Text("끈 채널은 AI 호출을 하지 않아 비용이 들지 않고, 결과 탭에서도 빠집니다. 이미 만들어 둔 내용은 지우지 않습니다. "

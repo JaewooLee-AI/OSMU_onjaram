@@ -693,7 +693,7 @@ BAND_VIDEO_H = 886         # 영상 창 기본 높이(폭은 화면 폭 전체).
 FULL_BOTTOM_SAFE = 150     # 영상 위주 모양의 아래 UI 가림 영역(예전 카드 모양은 240) — 그 아래는 쓰지 않는다
 BAND_REGION_MIN = 420      # 아래 띠 내용 영역의 최소 높이
 BAND_TITLE_SHIFT = 18      # 제목을 전체 화면 모양보다 조금 아래로(칩과 간격)
-VIDEO_LAYOUTS = ("band", "full", "card")     # 영상 띠 | 영상 전체 화면(영상 위 글자) | 카드 모양(예전, 사진 칸)
+VIDEO_LAYOUTS = ("typo", "band", "full", "card")     # 글자 중심(cards/shorts_typo) | 영상 띠 | 영상 전체 화면(영상 위 글자) | 카드 모양(예전, 사진 칸)
 
 
 def band_base_png(path: str, pal: dict, width: int, height: int, vh: int = BAND_VIDEO_H) -> str:

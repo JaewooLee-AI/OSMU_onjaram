@@ -33,3 +33,8 @@ installer/*.ico
 # 회사 원본 문서(워드·사진). 공개 저장소에는 올리지 않습니다.
 info/
 .pytest_cache/
+
+# 쇼츠 배경 음원 — 라이선스(예: Pixabay)가 원본 파일 단독 배포를 금지하므로 공개 저장소에 올리지 않습니다.
+# 음원은 앱 설정 → 📣 생성 채널 → 🎵 쇼츠 배경 음악에서 PC마다 추가합니다(데이터 폴더 music/).
+cards/music/*
+!cards/music/LICENSES.md

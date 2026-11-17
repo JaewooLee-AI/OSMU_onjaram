@@ -17,7 +17,7 @@ import flet as ft
 from flet_app.save_dialog import is_web, save_bytes, zip_files
 
 from cards.schema import CARD_ASPECT_LABELS, CARD_ASPECTS
-from cards import card_types, design_templates, edit as card_edit, ffmpeg_tools, images, preview, shorts_ed, shorts_script, tts
+from cards import bgm, card_types, design_templates, edit as card_edit, ffmpeg_tools, images, preview, shorts_ed, shorts_script, tts
 from cards.paths import EXPORTS_DIR
 from core import repo, storage
 
@@ -421,14 +421,23 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         else:
             big = ft.Container(width=400, height=500, bgcolor="#F3F1EC", border_radius=12, alignment=ft.Alignment.CENTER,
                                content=ft.Text("아직 그리지 않았습니다.\n② 다듬기의 [적용]을 누르세요.", text_align=ft.TextAlign.CENTER))
-        thumbs = ft.Row([
-            ft.GestureDetector(on_tap=lambda e, k=k: select(k), content=ft.Container(
-                content=ft.Image(src=_src(p, 160), width=70, height=88, fit=ft.BoxFit.CONTAIN, border_radius=4) if os.path.exists(p)
-                else ft.Container(width=70, height=88, bgcolor="#F3F1EC", border_radius=4),
+        # 작은 그림은 한 줄에 모두 들어가게 크기를 맞춘다(카드 최대 8장 — 옆으로 넘기거나 줄을 바꾸면 아래 저장 버튼이 밀려 안 보임).
+        count = len(paths) if paths else n
+        tw = max(36, min(70, (404 - (count - 1) * 6) // max(1, count) - 6))
+        th = int(tw * 88 / 70)
+
+        def thumb(k: int, p: str) -> ft.Control:
+            img = (ft.Image(src=_src(p, 160), width=tw, height=th, fit=ft.BoxFit.CONTAIN, border_radius=4) if p and os.path.exists(p)
+                   else ft.Container(width=tw, height=th, bgcolor="#F3F1EC", border_radius=4))
+            badge = ft.Container(ft.Text(str(k + 1), size=fs(10, scale), color=ft.Colors.WHITE, weight=ft.FontWeight.BOLD),
+                                 bgcolor="#4A7C59" if k == i else "#99000000", border_radius=8,
+                                 padding=ft.Padding.symmetric(horizontal=6, vertical=1), left=3, top=3)
+            return ft.GestureDetector(on_tap=lambda e, k=k: select(k), mouse_cursor=ft.MouseCursor.CLICK, content=ft.Container(
+                content=ft.Stack([img, badge], width=tw, height=th),
                 border=ft.Border.all(3 if (k == i or k in stale) else 1, "#4A7C59" if k == i else ("#E0A030" if k in stale else "#1F000000")),
-                border_radius=6, padding=1))
-            for k, p in enumerate(paths or [""] * n)
-        ], spacing=6, scroll=ft.ScrollMode.AUTO)
+                border_radius=6, padding=1, tooltip=f"{k + 1}번 · {preview.archetype_name(sb.card_slides[k].slide_type)}" if k < n else None))
+
+        thumbs = ft.Row([thumb(k, p) for k, p in enumerate(paths or [""] * n)], spacing=6, width=404)
         save_row: list[ft.Control] = []
         if paths:
             folder = os.path.dirname(paths[0])
@@ -456,11 +465,11 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
             *banner,
             big,
             ft.Row([ft.IconButton(ft.Icons.CHEVRON_LEFT, on_click=lambda e: select(max(0, i - 1)), disabled=i == 0),
-                    ft.Text(f"{i + 1} / {n} · {sb.card_slides[i].slide_type}", size=fs(12, scale)),
+                    ft.Text(f"{i + 1} / {n} · {preview.archetype_name(sb.card_slides[i].slide_type)}", size=fs(12, scale)),
                     ft.IconButton(ft.Icons.CHEVRON_RIGHT, on_click=lambda e: select(min(n - 1, i + 1)), disabled=i >= n - 1)],
                    alignment=ft.MainAxisAlignment.CENTER),
             thumbs, *save_row,
-        ], spacing=8, width=410)
+        ], spacing=8, width=410, scroll=ft.ScrollMode.AUTO)      # 창이 낮아도 아래 저장 버튼까지 내려 볼 수 있게
 
     # ------------------------------------------------------------------ 2단계: 다듬기
     edit_refs: dict = {}
@@ -662,22 +671,32 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                                 options=[ft.DropdownOption(key=k, text=v) for k, v in TRANSITION_OPTIONS.items()])
     short_ai = ft.Switch(label="AI로 내레이션 다듬기", value=False)
     LAYOUT_NOTE = {
+        "typo": "카드 내용을 화면에 충실하게 담습니다: 제목·요약·본문·항목이 장면 시작에 차례로 나타난 뒤 멈춰서 읽을 수 있고(자막을 음성에 맞추지 않음), "
+                "강조어에는 형광펜이 칠해집니다. 가로 영상·사진은 제목 아래 창에, 세로 영상·사진은 화면 가득, 미디어가 없으면 글자만으로 채웁니다. "
+                "대본은 화면에 보이는 카드 내용을 빠짐없이 읽고, 그래도 화면 글자를 읽을 시간이 모자라면 그 장면을 최대 1초 늘립니다. '글자 움직임'을 '없음'으로 하면 글자가 처음부터 보입니다(장면 전환 효과는 쓰지 않음).",
         "band": "위 띠에 시리즈 이름과 제목, 가운데 영상 창, 아래 띠에 지금 읽는 문장(큰 자막)이 나옵니다. 올린 영상은 장면 순서대로 이어서 재생되고(없으면 사진이 확대·축소로 움직임), "
                 "영상 전체가 보이도록 맞추고 양옆은 같은 영상을 흐리게 깝니다. 특정 장면만 다른 영상·사진을 쓰려면 아래 대본에서 고르세요. "
                 "단계·체크·안내·숫자 장면은 아래 띠에 내용 패널이 음성에 맞춰 나타나고(자막은 생략), 비교표는 카드 모양입니다.",
         "full": "올린 영상(없으면 사진)을 화면 전체에 깔고 위에 시리즈 이름과 제목, 아래에 자막을 얹습니다. 단계·체크·안내·숫자 장면은 영상 위 반투명 패널로 나옵니다. 비교표는 카드 모양입니다.",
         "card": "예전 모양: 카드 디자인을 그대로 9:16으로 그리고 사진 칸 안에서만 사진·영상이 움직입니다. 목록 칸이 음성에 맞춰 하나씩 나타납니다.",
     }
-    layout_dd = ft.Dropdown(label="쇼츠 모양", width=340, dense=True, value="band",
-                            options=[ft.DropdownOption(key="band", text="영상 띠 모양 (위 제목·가운데 영상·아래 자막) — 권장"),
+    layout_dd = ft.Dropdown(label="쇼츠 모양", width=340, dense=True, value="typo",
+                            options=[ft.DropdownOption(key="typo", text="글자 중심 (카드 내용 + 글자 움직임) — 권장"),
+                                     ft.DropdownOption(key="band", text="영상 띠 모양 (위 제목·가운데 영상·아래 자막)"),
                                      ft.DropdownOption(key="full", text="영상 전체 화면 (영상 위에 글자)"),
                                      ft.DropdownOption(key="card", text="카드 모양 (예전, 텍스트 기반)")],
-                            on_select=lambda e: (setattr(layout_note, "value", LAYOUT_NOTE[layout_dd.value or "band"]), _u(layout_note)))
+                            on_select=lambda e: (setattr(layout_note, "value", LAYOUT_NOTE[layout_dd.value or "typo"]), _u(layout_note)))
     layout_note = ft.Text("", size=fs(10, scale), color=BRAND_COLORS["text_muted"])
     speed_dd = ft.Dropdown(label="동영상 재생 속도", width=250, dense=True, value="auto",
                            options=[ft.DropdownOption(key="auto", text="자동 (짧으면 천천히)"), ft.DropdownOption(key="0.5", text="0.5배 (느리게)"),
                                     ft.DropdownOption(key="0.75", text="0.75배"), ft.DropdownOption(key="1", text="1배 (보통)"),
                                     ft.DropdownOption(key="1.5", text="1.5배"), ft.DropdownOption(key="2", text="2배 (빠르게)")])
+    music_now = outputs.default_music()
+    music_dd = ft.Dropdown(label="배경 음악", width=300, dense=True, value=music_now["track"],
+                           options=[ft.DropdownOption(key="", text="음악 없음")] + [ft.DropdownOption(key=t["id"], text=bgm.label(t)) for t in bgm.tracks()],
+                           tooltip="말하는 동안에는 음악이 자동으로 작아집니다. 음원 추가·기본값은 설정 → 📣 생성 채널.")
+    music_vol_dd = ft.Dropdown(label="음악 크기", width=140, dense=True, value=music_now["volume"],
+                               options=[ft.DropdownOption(key=k, text=v) for k, v in bgm.VOLUME_LABELS.items()])
     scene_refs: list = []
 
     def apply_scenes(mark_fresh: bool = True) -> None:
@@ -717,7 +736,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
 
         def job(progress) -> str:
             progress("쇼츠 대본을 만드는 중…")
-            scenes, report = shorts_script.convert(S["sb"], S["campaign"].get("brand_kit_id"), int(seconds_dd.value), use_llm=short_ai.value)
+            scenes, report = shorts_script.convert(S["sb"], S["campaign"].get("brand_kit_id"), int(seconds_dd.value), use_llm=short_ai.value,
+                                                   follow_screen=(layout_dd.value or "typo") == "typo")
             shorts_script.apply_to_storyboard(S["sb"], scenes)
             save_storyboard(S["cid"], S["sb"])
             S["report"] = report
@@ -738,7 +758,8 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                 async def cb(pct: float, msg: str) -> None:
                     progress(msg)
                 result = render_video(S["cid"], S["sb"], voice_dd.value, "tri", progress=cb, photo_motion=motion_dd.value,
-                                      text_motion=text_motion_dd.value, transition=transition_dd.value, video_layout=layout_dd.value or "band", video_speed=speed_dd.value or "auto")
+                                      text_motion=text_motion_dd.value, transition=transition_dd.value, video_layout=layout_dd.value or "typo", video_speed=speed_dd.value or "auto",
+                                      music=music_dd.value or "", music_volume=music_vol_dd.value or "mid")
                 return f"✅ 쇼츠 영상을 만들었습니다: {result}"
 
             run_job("쇼츠 영상을 만드는 중입니다 (수 분 걸릴 수 있어요)", job)
@@ -760,8 +781,9 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         items.append(ft.Row([seconds_dd, voice_dd, motion_dd, text_motion_dd, transition_dd], spacing=8, wrap=True))
         if design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout):
             items.append(ft.Row([layout_dd, speed_dd], wrap=True))
-            layout_note.value = LAYOUT_NOTE[layout_dd.value or "band"]
+            layout_note.value = LAYOUT_NOTE[layout_dd.value or "typo"]
             items.append(layout_note)
+        items.append(ft.Row([music_dd, music_vol_dd], spacing=8, wrap=True))
         items.append(ft.Row([short_ai], wrap=True))
         videos = [a for a in sb.assets if a.kind == "video"]
         native = design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout)

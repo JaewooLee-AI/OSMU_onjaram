@@ -58,7 +58,7 @@ from core.brand_seed import apply_seed_fixes, seed_if_empty  # noqa: E402
 from core.db import init_db  # noqa: E402
 
 from flet_app.state import FONT_SCALE_STATE_KEY, AppState  # noqa: E402
-from flet_app.theme import DEFAULT_FONT_SCALE, build_theme  # noqa: E402
+from flet_app.theme import APP_FONTS, DEFAULT_FONT_SCALE, build_theme  # noqa: E402
 from flet_app.views import (  # noqa: E402
     brand_kit_view,
     dashboard_view,
@@ -120,6 +120,7 @@ def main(page: ft.Page) -> None:
     # 고정한다 — 안 그러면 커스텀 텍스트 테마 색상이 다크 모드 기본값과 어긋나
     # 글자가 안 보이는 문제가 생긴다.
     page.theme_mode = ft.ThemeMode.LIGHT
+    page.fonts = APP_FONTS                 # 한글 글꼴을 앱에 담아 씀(theme.APP_FONT)
     page.theme = build_theme(state.font_scale)
     page.window.width = 1280
     page.window.height = 860

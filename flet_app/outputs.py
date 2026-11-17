@@ -50,6 +50,24 @@ def save_default_shorts_seconds(seconds: int) -> None:
     repo.set_app_state(SHORTS_SECONDS_KEY, {"value": int(seconds) if int(seconds) in SHORTS_SECONDS else 45})
 
 
+MUSIC_KEY = "shorts_music"
+
+
+def default_music() -> dict:
+    """쇼츠 배경 음악 기본값(설정 → 생성 채널): {"track": 음원 id 또는 "", "volume": low|mid|high}. 고른 음원이 지워졌으면 음악 없음."""
+    from cards import bgm
+    v = (repo.get_app_state(MUSIC_KEY) or {}).get("value") or {}
+    track = v.get("track") or ""
+    if track and not bgm.resolve(track):
+        track = ""
+    vol = v.get("volume") if v.get("volume") in bgm.VOLUMES else bgm.DEFAULT_VOLUME
+    return {"track": track, "volume": vol}
+
+
+def save_default_music(track: str, volume: str) -> None:
+    repo.set_app_state(MUSIC_KEY, {"value": {"track": track or "", "volume": volume or "mid"}})
+
+
 def save_default_outputs(keys: List[str]) -> None:
     repo.set_app_state(STATE_KEY, {"value": [k for k in OUTPUT_KEYS if k in keys]})
 

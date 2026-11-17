@@ -42,8 +42,15 @@ def fs(base: int, scale: float) -> int:
     return round(base * scale)
 
 
+# 앱 글꼴: Pretendard(OFL, flet_app/assets/fonts). 브라우저 실행에서 한글 글꼴을 따로 내려받는 동안
+# 큰 글자(창 제목 등)가 겹쳐 깨져 보이던 문제를 막으려고 앱에 담아 기본 글꼴로 씁니다. 굵은 글자는 Flutter가 굵게 만들어 그림.
+APP_FONT = "Pretendard"
+APP_FONTS = {APP_FONT: "fonts/Pretendard-Regular.otf"}
+
+
 def build_theme(scale: float = DEFAULT_FONT_SCALE) -> ft.Theme:
     return ft.Theme(
+        font_family=APP_FONT,
         color_scheme=ft.ColorScheme(
             primary=BRAND_COLORS["primary"],
             secondary=BRAND_COLORS["secondary"],

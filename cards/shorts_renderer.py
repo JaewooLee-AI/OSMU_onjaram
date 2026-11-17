@@ -11,10 +11,11 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps
 from cards.schema import ShortsScene, EditableStoryboard, MediaAsset
 from cards.fonts import korean_font, display_font, wrap_text_px, text_height
 from cards import brand as bk
-from cards import ffmpeg_tools, shorts_ed, shorts_script
+from cards import ffmpeg_tools, shorts_ed, shorts_script, shorts_typo
 from cards import tokens as T
 from cards.card_renderer import _rgb
 SCENE_GAP = 0.3  # 씬 사이 호흡(초)
+END_HOLD = 1.5   # 3단·카드 디자인 쇼츠: 마지막 내레이션이 끝난 뒤 완성된 끝 화면(상담 안내)을 더 보여 주는 시간(초)
 
 
 @dataclass
@@ -31,7 +32,9 @@ class ShortsOptions:
     video_mode: str = "image"           # image(사진 움직이기) | link(다음 장면 사진까지 이어서)
     video_overrides: Optional[Dict[int, MediaAsset]] = None  # {장면 인덱스: AI 동영상} — 해당 장면 배경만 교체
     video_speed: str = "auto"           # 동영상 재생 속도: auto(올린 영상이 쇼츠보다 짧으면 천천히, 최대 0.5배 — 그래도 모자라면 반복) | 0.5 | 0.75 | 1 | 1.5 | 2
-    video_layout: str = "band"          # (에디토리얼·리포트) band(위 띠 제목 + 가운데 영상 창 + 아래 띠 자막·내용 — 영상 전체가 보이고 양옆은 흐린 배경) | full(영상 전체 화면, 위에 글자) | card(예전 카드 모양: 사진 칸)
+    video_layout: str = "typo"          # (에디토리얼·리포트) typo(글자 중심: 카드 내용을 화면에 담고 장면 시작에만 글자가 움직임, 자막을 음성에 맞추지 않음 — shorts_typo) | band(위 띠 제목 + 가운데 영상 창 + 아래 띠 자막·내용 — 영상 전체가 보이고 양옆은 흐린 배경) | full(영상 전체 화면, 위에 글자) | card(예전 카드 모양: 사진 칸)
+    music: str = ""                     # 배경 음악 id(cards.bgm: 'app:파일'·'user:파일') — 비우면 음악 없음
+    music_volume: str = "mid"           # low | mid | high — 말할 때는 자동으로 더 줄어듦
     media_overrides: Optional[Dict[int, Any]] = None  # (에디토리얼) {장면 인덱스: shorts_ed.SceneMedia} — 사진 칸에 이미지 두 장·영상 클립 등을 직접 지정
 
 
@@ -138,11 +141,24 @@ class ShortsRendererService:
         shutil.rmtree(work_dir, ignore_errors=True)
         os.makedirs(work_dir)
         try:
+            design = design_templates.get(storyboard.design_id)
+            typo = design_templates.native_shorts(design.layout) and self.options.video_layout == shorts_typo.LAYOUT
+            min_durs, max_pad = None, None
+            if typo:
+                # 글자 중심 모양: 화면 글자를 다 읽을 시간이 음성보다 길면 그 장면을 늘린다(음성 뒤에 쉼을 둠)
+                min_durs = []
+                for sc in scenes:
+                    sl = self._slide_of(storyboard, sc)
+                    min_durs.append(shorts_typo.read_seconds(self._typo_content(storyboard, sl), self.options.text_motion != "none")
+                                    if shorts_ed.uses_full(sl.slide_type) else 0.0)
+                max_pad = shorts_typo.PAD_MAX
             await progress(0.1, "씬별 한국어 내레이션 음성 합성 중...")
-            timeline, total = await self._synthesize_scenes(scenes, work_dir, audio_path, storyboard.tone_and_manner or "")
+            timeline, total = await self._synthesize_scenes(scenes, work_dir, audio_path, storyboard.tone_and_manner or "", min_durs,
+                                                            max_pad=max_pad, end_hold=END_HOLD)
+            if typo and getattr(self, "_padded", 0.0) > 0.4:
+                self.last_notes.append(f"화면 글자를 읽을 시간을 위해 장면을 모두 {self._padded:.1f}초 늘렸습니다.")
 
             await progress(0.5, "3단 프레임 그리는 중...")
-            design = design_templates.get(storyboard.design_id)
             # 3단 디자인은 쇼츠용 3단 프레임으로, 그 밖의 디자인(온자람 등)은 카드를 그 디자인 그대로 9:16 화면 가운데 놓는다.
             card_mode = design.layout != "tri"
             tri_id = storyboard.design_id
@@ -163,7 +179,7 @@ class ShortsRendererService:
                 frames.FOLLOW_ASPECT = False
             motion = self.options.photo_motion
             text_motion = self.options.text_motion != "none"
-            use_trans = self.options.transition != "none" and len(timeline) > 1
+            use_trans = self.options.transition != "none" and len(timeline) > 1 and not typo     # 글자 중심 모양은 글자가 빠지는 움직임이 전환을 대신한다
             fps = self.FPS
             half = max(1, round(self.TRANSITION_SEC * fps / 2)) if use_trans else 0
             _, (m0, m1), _ = frames._tri_zones(design.ratio if design.layout == "tri" else [2, 5, 3])
@@ -173,7 +189,7 @@ class ShortsRendererService:
             animated = motion != "none" or text_motion or use_trans or ed_native
             shown_cards: set = set()
             auto_media: Dict[int, Any] = {}
-            if ed_native and self.options.video_layout in ("band", "full"):
+            if ed_native and self.options.video_layout in ("band", "full", shorts_typo.LAYOUT):
                 # 올린 동영상은 카드의 사진보다 먼저 쓴다: 직접 영상을 고른 장면만 빼고 모든 장면에 순서대로 이어 재생한다
                 ov = self.options.media_overrides or {}
                 explicit = {k: ((k in ov and ov[k].usable()) or bool(getattr(sc["scene"], "asset_id", None)
@@ -206,8 +222,47 @@ class ShortsRendererService:
                 slide_n = storyboard.card_slides[idx]
                 if n in auto_media:
                     media = auto_media[n]
-                elif media is not None and media.kind == "video" and self.options.video_layout in ("band", "full"):
+                elif media is not None and media.kind == "video" and self.options.video_layout in ("band", "full", shorts_typo.LAYOUT):
                     media.speed = shorts_ed.resolve_speed(self.options.video_speed, storyboard, total)        # 직접 고른 영상에도 같은 속도
+                if typo and shorts_ed.uses_full(slide_n.slide_type):
+                    # 글자 중심 장면: 카드 내용을 화면에 담고(미디어가 없어도 됨) 프레임을 한 장씩 그린다
+                    dur = item["end"] - item["start"]
+                    n_frames = max(2, int(round(dur * fps)))
+                    seg = os.path.join(work_dir, f"seg_{n:02d}.mp4")
+                    if motion == "alternate":
+                        kind = "zoom_in" if n % 2 == 0 else "zoom_out"
+                    elif motion == "dynamic":
+                        kind = ("zoom_in", "pan", "zoom_out", "pan")[n % 4]
+                    else:
+                        kind = motion if motion in ("zoom_in", "zoom_out") else "none"
+                    m_use = media if (media is not None and media.usable()) else None
+                    content = self._typo_content(storyboard, slide_n)
+                    kw = dict(series=(getattr(storyboard.brand_elements, "series_label", "") or "").strip(),
+                              page=f"{n + 1:02d} / {n_scenes:02d}", last=(n == n_scenes - 1), animated=self.options.text_motion != "none",
+                              progress=(item["start"] / max(0.1, total), item["end"] / max(0.1, total)), motion=kind)
+                    pal = shorts_ed.full_palette(design)
+                    try:
+                        res = await asyncio.to_thread(shorts_typo.render_segment, seg, content, pal, m_use, n_frames, **kw)
+                        if m_use is not None and res["arrangement"] == "none":     # 크기를 읽지 못한 미디어(깨진 파일 등)
+                            self.last_warnings.append(f"{n + 1}번째 장면의 사진·동영상을 읽지 못해 글자만으로 만들었습니다.")
+                    except Exception as ex:  # noqa: BLE001 — 영상을 못 읽으면 그 영상의 한 장면(정지 사진)으로, 그래도 안 되면 미디어 없이
+                        logging.getLogger(__name__).warning(f"글자 중심 장면 실패: {ex}")
+                        still = None
+                        if m_use is not None and m_use.kind == "video":
+                            raw = await asyncio.to_thread(ffmpeg_tools.extract_frame, m_use.paths[0], m_use.clip_start)
+                            if raw:
+                                still = os.path.join(work_dir, f"tstill_{n:02d}.png")
+                                with open(still, "wb") as f:
+                                    f.write(raw)
+                        fallback = shorts_ed.SceneMedia("image", [still]) if still else None
+                        await asyncio.to_thread(shorts_typo.render_segment, seg, content, pal, fallback, n_frames, **kw)
+                        self.last_warnings.append(f"{n + 1}번째 장면의 동영상을 읽지 못해 " + ("그 영상의 한 장면(정지 사진)으로" if still else "글자만으로") + " 만들었습니다.")
+                    shown_cards.add(idx)
+                    moved += 1
+                    seg_frames.append((seg, n_frames))
+                    listing.append((seg, dur))
+                    last = seg
+                    continue
                 if (ed_native and self.options.video_layout in ("band", "full") and media is not None and media.usable()
                         and shorts_ed.uses_full(slide_n.slide_type)):
                     # 영상 중심 장면: 카드를 그리지 않고 미디어를 화면 전체에 깔아 합성한다
@@ -323,7 +378,9 @@ class ShortsRendererService:
                 lines = []
                 for path, dur in listing:
                     lines += [f"file '{path.replace(chr(92), '/').replace(chr(39), chr(39) + chr(92) + chr(39) + chr(39))}'", f"duration {dur:.3f}"]
-                lines.append(f"file '{last.replace(chr(92), '/')}'")   # concat 규칙: 마지막 프레임을 한 번 더
+                if not animated:   # concat 규칙: 정지 그림은 마지막 그림을 한 번 더(마지막 duration이 지켜지게).
+                    # 장면마다 만든 동영상 조각(animated)에는 넣지 않는다 — 넣으면 마지막 장면 첫머리가 끝에 다시 붙어 그 화면으로 끝남
+                    lines.append(f"file '{last.replace(chr(92), '/')}'")
                 concat = os.path.join(work_dir, "frames.txt")
                 with open(concat, "w", encoding="utf-8") as f:
                     f.write("\n".join(lines) + "\n")
@@ -624,16 +681,7 @@ class ShortsRendererService:
         items = shorts_script.list_items(slide)
         phone = address = ""
         if slide.slide_type == "call_to_action":
-            import re as _re
-            from cards.brand import from_db
-            m = _re.search(r"\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}", slide.body_content or "")
-            try:
-                bid = str(getattr(storyboard, "brand_id", "") or "")
-                kit = from_db(int(bid) if bid.isdigit() else None)
-            except Exception:  # noqa: BLE001 — 킷을 못 읽어도 본문의 번호로 만든다
-                kit = None
-            phone = m.group(0) if m else (getattr(kit, "phone", "") or "")
-            address = getattr(kit, "address", "") or ""
+            phone, address = self._cta_contact(storyboard, slide)
         # 전체 화면 모양도 정보 장면은 자막을 빼고 패널을 맨 아래(자막 자리)에 둔다 — 같은 글이 두 번 나오지 않고 영상 가운데를 가리지 않는다
         p_bottom = region_bot if band else H - shorts_ed.FULL_BOTTOM_SAFE - shorts_ed.PROGRESS_H - 14
         panels = shorts_ed.panel_layers(slide, items, pal, W, p_bottom, work_dir, tag, phone, address, top=region_top)
@@ -785,6 +833,28 @@ class ShortsRendererService:
             await self._run(build(shorts_ed.SceneMedia("image", [still]), None), "영상 위주 장면 합성 실패")
         except RuntimeError as ex:
             raise shorts_ed.FullSceneError(str(ex)) from ex
+
+    @staticmethod
+    def _slide_of(storyboard, scene):
+        source = (scene.source_cards or [1])[0]
+        return storyboard.card_slides[max(0, min(source, len(storyboard.card_slides)) - 1)]
+
+    def _cta_contact(self, storyboard, slide) -> Tuple[str, str]:
+        """상담 안내 카드의 (전화, 주소): 전화는 본문에 적힌 번호 → 브랜드 킷 순, 주소는 브랜드 킷."""
+        from cards.brand import from_db
+        m = re.search(r"\d{2,4}[-.\s]\d{3,4}[-.\s]\d{4}", slide.body_content or "")
+        try:
+            bid = str(getattr(storyboard, "brand_id", "") or "")
+            kit = from_db(int(bid) if bid.isdigit() else None)
+        except Exception:  # noqa: BLE001 — 킷을 못 읽어도 본문의 번호로 만든다
+            kit = None
+        return (m.group(0) if m else (getattr(kit, "phone", "") or "")), (getattr(kit, "address", "") or "")
+
+    def _typo_content(self, storyboard, slide) -> "shorts_typo.Content":
+        phone = address = ""
+        if slide.slide_type == "call_to_action":
+            phone, address = self._cta_contact(storyboard, slide)
+        return shorts_typo.content_of(slide, T.KICKERS.get(slide.slide_type, ""), phone, address)
 
     ED_SAFE_TOP = T.SPACE["shorts_safe_top"]      # 에디토리얼 9:16: 위쪽 UI(채널명·검색) 가림 영역
     ED_SAFE_BOTTOM = T.SPACE["shorts_safe_bottom"]   # 아래쪽 UI(설명·버튼) 가림 영역
@@ -957,8 +1027,33 @@ class ShortsRendererService:
         self.last_tts_engine = f"Gemini TTS · {tts.voice} ({tts.model['model_id']})" + (f" · 캐시 {reused}개 재사용" if reused else "")
         return outs
 
-    async def _synthesize_scenes(self, scenes: List[ShortsScene], work_dir: str, audio_path: str, tone: str = ""):
+    async def _mix_music(self, audio_path: str, total: float) -> None:
+        """options.music이 있으면 음성 아래에 배경 음악을 깐다(말할 때 줄임). 음원을 못 찾거나 섞기에 실패하면 음성만 두고 경고."""
+        from cards import bgm
+        if not self.options.music:
+            return
+        music = bgm.resolve(self.options.music)
+        if not music:
+            self.last_warnings.append("고른 배경 음악 파일을 찾지 못해 음악 없이 만들었습니다.")
+            return
+        mixed = audio_path + ".bgm.mp3"
+        try:
+            await self._run([ffmpeg_tools.ffmpeg(), *bgm.mix_args(audio_path, music, total, bgm.volume_of(self.options.music_volume), mixed)],
+                            "배경 음악 섞기 실패")
+            os.replace(mixed, audio_path)
+            self.last_notes.append(f"배경 음악: {os.path.basename(music)}")
+        except Exception as exc:  # noqa: BLE001 — 음악은 덤: 실패해도 음성만으로 계속
+            self.last_warnings.append(f"배경 음악을 섞지 못해 음악 없이 만들었습니다: {exc}")
+            if os.path.exists(mixed):
+                os.remove(mixed)
+
+    async def _synthesize_scenes(self, scenes: List[ShortsScene], work_dir: str, audio_path: str, tone: str = "",
+                                 min_durations: Optional[List[float]] = None, max_pad: Optional[float] = None,
+                                 end_hold: float = 0.0):
+        """min_durations: 장면마다 최소 길이(초) — 음성(+장면 사이 쉼)이 이보다 짧으면 음성 뒤에 쉼을 더 둔다.
+        max_pad: 그 쉼의 장면당 최대(초). end_hold: 마지막 장면 뒤에 더 둘 쉼(끝 화면을 보여 주는 시간). 배경 음악(options.music)이 있으면 다 합친 뒤 음성 아래에 깐다."""
         timeline: List[Dict[str, Any]] = []
+        self._padded = 0.0
         if self.options.voice == "silent":     # 테스트 전용: 음성 합성·인터넷·사용 기록 없이 장면 길이만큼 무음
             files = await asyncio.to_thread(self._silent_scenes, scenes, work_dir)
         else:
@@ -980,21 +1075,36 @@ class ShortsRendererService:
             dur = await self._get_audio_duration(path)
             timeline.append({"scene": scene, "audio": path, "speech": dur if dur > 0 else max(1.0, scene.duration_seconds)})
 
-        # 씬 오디오 이어붙이기 (씬 사이 SCENE_GAP초 여백)
+        # 씬 오디오 이어붙이기 (씬 사이 SCENE_GAP초 여백, 최소 길이가 있으면 그만큼)
+        lengths = []
+        for idx, item in enumerate(timeline):
+            base = item["speech"] + (SCENE_GAP if idx < len(timeline) - 1 else 0.0)
+            want = (min_durations[idx] if (min_durations and idx < len(min_durations)) else 0.0) or 0.0
+            if max_pad is not None:
+                want = min(want, base + max_pad)
+            if idx == len(timeline) - 1:
+                base += max(0.0, end_hold)
+            lengths.append(max(base, want))
+            self._padded += max(0.0, want - base)
         inputs, filters = [], []
         for idx, f in enumerate(files):
             inputs += ["-i", f]
-            pad = f",apad=pad_dur={SCENE_GAP}" if idx < len(files) - 1 else ""
+            if abs(lengths[idx] - timeline[idx]["speech"]) > 0.001:
+                pad = f",apad=whole_dur={lengths[idx]:.3f},atrim=end={lengths[idx]:.3f}"
+            else:
+                pad = ""
             filters.append(f"[{idx}:a]aformat=sample_rates=44100:channel_layouts=stereo{pad}[a{idx}]")
         concat = "".join(f"[a{i}]" for i in range(len(files))) + f"concat=n={len(files)}:v=0:a=1[out]"
         cmd = [ffmpeg_tools.ffmpeg(), "-y", "-v", "error", *inputs, "-filter_complex", ";".join(filters + [concat]),
                "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "192k", audio_path]
         await self._run(cmd, "내레이션 오디오 결합 실패")
 
+        await self._mix_music(audio_path, sum(lengths))
+
         t = 0.0
         for idx, item in enumerate(timeline):
             item["start"] = t
-            item["end"] = t + item["speech"] + (SCENE_GAP if idx < len(timeline) - 1 else 0.0)
+            item["end"] = t + lengths[idx]
             t = item["end"]
         total = await self._get_audio_duration(audio_path)
         return timeline, max(total, t)

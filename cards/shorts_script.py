@@ -113,7 +113,50 @@ def _card_narration(card: CardSlide, budget: int) -> str:
     return text
 
 
-def _rule_based(sb: EditableStoryboard, seconds: int, brand) -> List[Dict[str, Any]]:
+def screen_narration(card: CardSlide) -> str:
+    """'글자 중심' 쇼츠용 내레이션: 그 장면 화면에 보이는 내용(제목·본문·항목·요약 한 줄·큰 숫자)을 빠짐없이 말로 잇는다.
+    화면과 말이 같은 내용을 다뤄야 장면 사이에 말 없이 화면만 남는 시간이 생기지 않는다.
+    순서: 표지는 제목 → 소개 → 본문, 그 밖에는 제목 → 본문(항목) → 요약 한 줄(마무리)."""
+    from cards import shorts_typo
+    c = shorts_typo.content_of(card)
+    head = _sentence(card.lead_headline)
+    said = {_clean(card.lead_headline)}
+    parts: List[str] = [head] if head else []
+
+    def add(text: str) -> None:
+        s = _sentence(text)
+        key = _clean(text)
+        if s and key and key not in said:
+            said.add(key)
+            parts.append(s)
+
+    if c.kind == "stat":
+        add(f"{c.stat[1]} {c.stat[0]}".strip())
+        for s in _prose_sentences("\n".join(c.lines)):
+            add(s)
+    elif c.kind == "list":
+        for i, (item, desc) in enumerate(c.items):
+            ordinal = _ORDINALS[i] + ", " if c.marker == "number" and i < len(_ORDINALS) else ""
+            if c.marker == "label" and desc:            # 안내 표: '일정, 매주 화요일.'
+                add(f"{item}, {desc}")
+                continue
+            add(ordinal + item)
+            if desc:
+                add(desc)
+        if c.sub:
+            add(c.sub)
+    else:
+        cover_intro = card.slide_type == "cover" and c.sub and not _clean(card.takeaway)
+        # 표지의 소개 줄은 본문 첫 줄이라 문장 중간에서 끊겼을 수 있다 → 본문과 이어 붙여 문장으로 되돌린다
+        body = ([c.sub] if cover_intro else []) + c.lines
+        for s in _prose_sentences("\n".join(body)):
+            add(s)
+        if c.sub and not cover_intro:
+            add(c.sub)
+    return " ".join(parts).strip()
+
+
+def _rule_based(sb: EditableStoryboard, seconds: int, brand, follow_screen: bool = False) -> List[Dict[str, Any]]:
     cards = sb.card_slides
     body = [c for c in cards if c.slide_type != "call_to_action"]
     has_cta = any(c.slide_type == "call_to_action" for c in cards)
@@ -132,7 +175,9 @@ def _rule_based(sb: EditableStoryboard, seconds: int, brand) -> List[Dict[str, A
                            "display_caption": _clean(card.lead_headline)[:30], "emphasis_words": []})
             continue
         _, terms = emphasis.parse(card.lead_headline)
-        if card in lists:
+        if follow_screen:
+            narration = screen_narration(card)
+        elif card in lists:
             narration = _card_narration(card, 0)
         else:   # 남은 예산을 남은 글 카드에 나눠 주고(쓰고 남으면 다음 카드로), 한 문장이 조금 넘치는 정도(25%)는 허용
             share = pool / max(1, prose_left)
@@ -147,7 +192,7 @@ def _rule_based(sb: EditableStoryboard, seconds: int, brand) -> List[Dict[str, A
     return scenes
 
 
-def _prompt(sb: EditableStoryboard, seconds: int, kit: dict) -> str:
+def _prompt(sb: EditableStoryboard, seconds: int, kit: dict, follow_screen: bool = False) -> str:
     cards = [{"번호": c.slide_number, "종류": c.slide_type, "제목": emphasis.strip(c.lead_headline), "내용": _items(c.body_content),
               "마지막한줄": c.takeaway, "큰숫자": c.stat_value, "숫자설명": c.stat_label}
              for c in sb.card_slides if c.slide_type != "call_to_action"]
@@ -155,7 +200,10 @@ def _prompt(sb: EditableStoryboard, seconds: int, kit: dict) -> str:
         f"[말투]\n{kit.get('tone_and_manner') or ''}\n\n"
         f"아래 카드뉴스를 약 {seconds}초 쇼츠 내레이션으로 바꿉니다. 카드마다 한 장면입니다(순서 유지). 첫 장면은 3초 안의 훅입니다.\n"
         "내레이션은 귀로 듣기 좋게 카드 문장을 풀어 쓰되, **카드에 없는 숫자·사실·가격을 만들지 말고**, 치료·완치·효과 보장 표현과 "
-        "낙인 표현을 쓰지 마세요. 차분하고 따뜻한 말투로, 한 장면은 2~3문장 이내입니다. 마지막 상담 안내는 시스템이 붙입니다.\n\n"
+        "낙인 표현을 쓰지 마세요. 차분하고 따뜻한 말투로, " + (
+            "화면에는 카드의 제목·내용·마지막한줄·큰숫자가 모두 글자로 보입니다. 장면마다 그 내용을 **빠짐없이**(목록은 모든 항목을, "
+            "항목의 설명까지) 차례대로 풀어 말하세요. 글자를 그대로 읽기보다 이어지는 말투로 바꾸되 새 내용을 더하지 마세요. "
+            if follow_screen else "한 장면은 2~3문장 이내입니다. ") + "마지막 상담 안내는 시스템이 붙입니다.\n\n"
         f"[카드]\n{json.dumps(cards, ensure_ascii=False)}\n\n"
         '반드시 JSON만 출력: {"scenes": [{"source_cards": [1], "narration_script": "...", "display_caption": "30자 이내", '
         '"emphasis_words": ["문구 속 단어"]}]}'
@@ -172,8 +220,10 @@ def _from_llm(raw: str, sb: EditableStoryboard) -> List[Dict[str, Any]]:
 
 
 def convert(sb: EditableStoryboard, kit_id: Optional[int] = None, seconds: int = 45, use_llm: bool = False,
-            generate=generate_text) -> Tuple[List[ShortsScene], Dict[str, Any]]:
-    """카드 → (쇼츠 장면, 보고서). 보고서: engine, warnings, blacklist_hits."""
+            generate=generate_text, follow_screen: bool = True) -> Tuple[List[ShortsScene], Dict[str, Any]]:
+    """카드 → (쇼츠 장면, 보고서). 보고서: engine, warnings, blacklist_hits.
+    follow_screen(기본): 화면('글자 중심' 쇼츠)에 보이는 카드 내용을 빠짐없이 읽는다 — 목표 길이로 문장을 덜어 내지 않는다.
+    끄면 예전처럼 목표 길이에 맞춰 글 카드의 문장을 덜어 낸다(영상 띠·카드 모양처럼 화면에 본문이 다 보이지 않는 경우)."""
     if not sb.card_slides:
         raise ValueError("카드가 없습니다. 먼저 카드뉴스를 기획하세요.")
     kit = repo.get_brand_kit(kit_id)
@@ -183,14 +233,14 @@ def convert(sb: EditableStoryboard, kit_id: Optional[int] = None, seconds: int =
     drafts = None
     if use_llm:
         try:
-            raw = generate(vendor=get_configured_vendor("text"), prompt=_prompt(sb, seconds, kit),
+            raw = generate(vendor=get_configured_vendor("text"), prompt=_prompt(sb, seconds, kit, follow_screen),
                            system="당신은 심리상담 기관의 쇼츠 대본 작가입니다. 카드에 없는 사실을 만들지 않습니다.",
                            max_tokens=3000, note="shorts-script")
             drafts = _from_llm(raw, sb)
             report["engine"] = "llm"
         except Exception as exc:  # noqa: BLE001 — 실패하면 규칙 기반으로 계속
             report["warnings"].append(f"AI 변환을 쓰지 못해 규칙 기반으로 만들었습니다: {exc}")
-    rule = _rule_based(sb, seconds, brand)
+    rule = _rule_based(sb, seconds, brand, follow_screen)
     if drafts is not None:
         # AI는 카드 장면 부분만 쓰고, 마지막 상담 안내는 규칙 기반(고정) 장면을 그대로 쓴다.
         cta = [s for s in rule if s["section_type"] == "conclusion" and any(
@@ -224,8 +274,12 @@ def convert(sb: EditableStoryboard, kit_id: Optional[int] = None, seconds: int =
         ))
     est = sum(s.duration_seconds for s in scenes) + 0.3 * max(0, len(scenes) - 1)
     if est > seconds * 1.2:
-        report["warnings"].append(f"대본이 목표 길이({seconds}초)보다 깁니다(약 {round(est)}초). 문장을 중간에서 자르지 않으려고 "
-                                  "그대로 두었습니다 — 더 짧게 하려면 목표 길이를 늘리거나, 'AI로 내레이션 다듬기'를 켜거나, 아래 대본에서 문장을 빼세요.")
+        if follow_screen:
+            report["warnings"].append(f"화면에 보이는 카드 내용을 모두 읽어서 대본이 목표 길이({seconds}초)보다 깁니다(약 {round(est)}초). "
+                                      "더 짧게 하려면 카드의 본문·항목을 줄이거나, 아래 대본에서 문장을 빼세요.")
+        else:
+            report["warnings"].append(f"대본이 목표 길이({seconds}초)보다 깁니다(약 {round(est)}초). 문장을 중간에서 자르지 않으려고 "
+                                      "그대로 두었습니다 — 더 짧게 하려면 목표 길이를 늘리거나, 'AI로 내레이션 다듬기'를 켜거나, 아래 대본에서 문장을 빼세요.")
     if report["blacklist_hits"]:
         terms = ", ".join(sorted({h["forbidden"] for h in report["blacklist_hits"]}))
         report["warnings"].append(f"금기어({terms})를 사전의 대체 표현으로 자동으로 바꿨습니다 — 문장이 어색하지 않은지 확인하세요.")

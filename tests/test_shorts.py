@@ -285,10 +285,12 @@ def test_silent_test_voice_makes_video_without_tts_or_usage(tmp_path):
     before = len(repo.list_usage()) if hasattr(repo, "list_usage") else 0
     renderer = ShortsRendererService(export_dir=str(tmp_path / "out"))
     mp4 = asyncio.run(renderer.render_shorts_video(sb, options=ShortsOptions(
-        frame_style="tri", voice="silent", tts_call=boom, photo_motion="dynamic", text_motion="slide", transition="auto")))
+        frame_style="tri", voice="silent", tts_call=boom, photo_motion="dynamic", text_motion="slide", transition="auto",
+        video_layout="band")))     # 길이 검사: 글자 중심 모양(기본)은 읽을 시간만큼 장면을 늘리므로 예전 모양으로
     assert not called and os.path.exists(mp4)
     assert any("무음" in w for w in renderer.last_warnings)
-    assert abs(_duration(mp4) - sum(max(1.0, s.duration_seconds) for s in scenes) - 0.3 * (len(scenes) - 1)) < 1.0
+    from cards.shorts_renderer import END_HOLD      # 끝 화면을 더 보여 주는 시간
+    assert abs(_duration(mp4) - sum(max(1.0, s.duration_seconds) for s in scenes) - 0.3 * (len(scenes) - 1) - END_HOLD) < 1.0
     from flet_app.views.shorts_studio import voice_note
     assert "비용 없음" in voice_note("silent", {})
 
