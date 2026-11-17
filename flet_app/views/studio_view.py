@@ -779,10 +779,18 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
         if not ffmpeg_tools.available():
             items.append(ft.Text("⚠️ FFmpeg를 찾을 수 없어 영상을 만들 수 없습니다.", size=fs(11, scale), color="#B3261E"))
         items.append(ft.Row([seconds_dd, voice_dd, motion_dd, text_motion_dd, transition_dd], spacing=8, wrap=True))
-        if design_templates.native_shorts(design_templates.get(sb.design_id or design_templates.DEFAULT_ID).layout):
-            items.append(ft.Row([layout_dd, speed_dd], wrap=True))
+        cur_design = design_templates.get(sb.design_id or design_templates.DEFAULT_ID)
+        can_layout = design_templates.native_shorts(cur_design.layout)
+        layout_dd.disabled = speed_dd.disabled = not can_layout
+        items.append(ft.Row([layout_dd, speed_dd], wrap=True))
+        if can_layout:
             layout_note.value = LAYOUT_NOTE[layout_dd.value or "typo"]
-            items.append(layout_note)
+            layout_note.color = BRAND_COLORS["text_muted"]
+        else:
+            layout_note.value = (f"⚠️ 지금 카드 디자인 '{cur_design.name.split(' (')[0]}'은(는) 예전 디자인이라 쇼츠 모양·동영상 재생 속도를 고를 수 없고 "
+                                 "3단 프레임 쇼츠로 만들어집니다. ① 카드 만들기에서 디자인을 온자람 에디토리얼·리포트로 바꿔 카드를 다시 만들면 고를 수 있습니다.")
+            layout_note.color = "#8A6D3B"
+        items.append(layout_note)
         items.append(ft.Row([music_dd, music_vol_dd], spacing=8, wrap=True))
         items.append(ft.Row([short_ai], wrap=True))
         videos = [a for a in sb.assets if a.kind == "video"]
@@ -808,7 +816,7 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                 start_tf = ft.TextField(label="동영상 시작(초)", width=130, dense=True, value=f"{float(scene.clip_start or 0.0):g}")
                 scene_refs.append((scene, cap, nar, media_dd, start_tf))
                 rows += [cap, nar, ft.Row([media_dd, start_tf], spacing=8, wrap=True), ft.Divider(height=6)]
-            items += collapsible(f"📝 대본 {len(sb.shorts_scenes)}장면 보기·고치기 (장면별 사진·동영상)", ft.Column(rows, spacing=6))
+            items += collapsible(f"대본 {len(sb.shorts_scenes)}장면 보기·고치기 (장면별 사진·동영상)", ft.Column(rows, spacing=6), button=True)
             items.append(ft.Text("🔊 " + describe_voice_estimate(estimate_voice(sb)), size=fs(11, scale)))
             current = (repo.get_campaign(S["cid"]) or {}).get("shorts_video_path")
             btns = [ft.FilledButton("쇼츠 영상 만들기", icon=ft.Icons.MOVIE, on_click=on_video, disabled=not ffmpeg_tools.available())]
