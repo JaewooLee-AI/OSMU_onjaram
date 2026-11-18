@@ -1837,10 +1837,11 @@ def _music_controls(scale: float) -> list:
                     last = bgm.add_user_track(src)["id"]
                 elif f.bytes:
                     import tempfile
-                    tmp = os.path.join(tempfile.mkdtemp(), os.path.basename(f.name))
-                    with open(tmp, "wb") as fh:
-                        fh.write(f.bytes)
-                    last = bgm.add_user_track(tmp)["id"]
+                    with tempfile.TemporaryDirectory() as tmpdir:      # 다 넣은 뒤 임시 파일을 지움
+                        tmp = os.path.join(tmpdir, os.path.basename(f.name))
+                        with open(tmp, "wb") as fh:
+                            fh.write(f.bytes)
+                        last = bgm.add_user_track(tmp)["id"]
                 else:
                     problems.append(f"{f.name}: 파일을 읽지 못했습니다")
                     continue

@@ -88,19 +88,22 @@ class UploadProgress:
 async def pick_videos(page: ft.Page, prog: UploadProgress) -> List[Picked]:
     """동영상을 고르게 하고 받아 온다. 고르기를 취소하면 []. 진행 창은 파일을 고른 뒤에 연다."""
     web = bool(getattr(page, "web", False))
-    status: dict = {}
+    status: dict = {}              # 파일 이름 → 오류 문구(성공은 "")
+    ended: list = []               # 끝난(성공·실패) 알림 수 — 이름이 같은 파일이 있어도 편 수로 기다림
     finished = asyncio.Event()
-    expect: set = set()
+    expect: list = []
 
     def on_upload(e) -> None:
         name = e.file_name
         if e.error:
             status[name] = e.error
+            ended.append(name)
         elif e.progress is not None:
             prog.set(f"{name} 받는 중… {e.progress:.0%}", e.progress)
             if e.progress >= 1.0:
-                status[name] = ""
-        if expect and expect <= set(status):
+                status.setdefault(name, "")
+                ended.append(name)
+        if expect and len(ended) >= len(expect):
             finished.set()
 
     fp = ft.FilePicker(on_upload=on_upload)
@@ -125,18 +128,19 @@ async def pick_videos(page: ft.Page, prog: UploadProgress) -> List[Picked]:
 
     # 브라우저 실행: 내장 업로드로 받는다(진행 알림은 on_upload)
     token = uuid.uuid4().hex[:12]
-    todo = [(f, p) for f, p in zip(files, out) if not p.error]
+    todo = [(i, f, p) for i, (f, p) in enumerate(zip(files, out)) if not p.error]
     if todo:
-        expect.update(f.name for f, _ in todo)
+        expect.extend(f.name for _, f, _ in todo)
         prog.set(f"동영상 {len(todo)}편을 받는 중…", 0.0)
-        await fp.upload([ft.FilePickerUploadFile(id=f.id, name=f.name, upload_url=page.get_upload_url(f"{token}/{f.name}", UPLOAD_TIMEOUT))
-                         for f, _ in todo])
+        # 파일마다 하위 폴더(번호)를 따로 둔다 — 이름이 같은 영상을 함께 올려도 서로 덮어쓰지 않게
+        await fp.upload([ft.FilePickerUploadFile(id=f.id, name=f.name, upload_url=page.get_upload_url(f"{token}/{i}/{f.name}", UPLOAD_TIMEOUT))
+                         for i, f, _ in todo])
         try:
             await asyncio.wait_for(finished.wait(), timeout=UPLOAD_TIMEOUT)
         except asyncio.TimeoutError:
             pass
-        for f, p in todo:
-            dest = os.path.join(UPLOAD_DIR, token, f.name)
+        for i, f, p in todo:
+            dest = os.path.join(UPLOAD_DIR, token, str(i), f.name)
             if status.get(f.name):
                 p.error = f"받지 못했습니다({status[f.name]})"
             elif os.path.isfile(dest):
