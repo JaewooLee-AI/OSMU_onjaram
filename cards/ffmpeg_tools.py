@@ -95,10 +95,18 @@ def h264_args(quality: str = "good", speed: str = "medium") -> list:
     return ["-c:v", enc, "-b:v", "8M" if quality == "high" else "6M"]
 
 
+_duration_cache: dict = {}
+
+
 def probe_duration(path: str) -> float:
-    """미디어 파일의 길이(초)를 ffprobe로 조회한다. 실패하거나 FFmpeg가 없으면 0.0."""
+    """미디어 파일의 길이(초)를 ffprobe로 조회한다. 실패하거나 FFmpeg가 없으면 0.0.
+    같은 파일(경로·크기·수정 시각)은 한 번만 묻는다 — 화면을 다시 그릴 때마다 영상마다 ffprobe를 띄우지 않게."""
     if not path or not os.path.isfile(path) or not available():
         return 0.0
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, int(st.st_mtime))
+    if key in _duration_cache:
+        return _duration_cache[key]
     try:
         import subprocess
         res = subprocess.run(
@@ -106,9 +114,12 @@ def probe_duration(path: str) -> float:
              "-of", "default=noprint_wrappers=1:nokey=1", path],
             capture_output=True, text=True, timeout=15, **no_window(),
         )
-        return max(0.0, float((res.stdout or "").strip()))
+        dur = max(0.0, float((res.stdout or "").strip()))
     except Exception:  # noqa: BLE001
         return 0.0
+    if dur > 0:
+        _duration_cache[key] = dur
+    return dur
 
 
 def probe_size(path: str) -> Tuple[int, int]:

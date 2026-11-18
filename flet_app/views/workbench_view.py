@@ -14,9 +14,13 @@ Flet은 화면을 다시 그릴 때마다 `repo.get_campaign()`을 새로 읽어
 """
 from __future__ import annotations
 
+import asyncio
+
 import time
 
 import flet as ft
+
+from flet_app import video_upload
 
 from ai_workers import blog_images, content_mode, factsheet, formatting, post_types, vision
 from ai_workers.content_writer import (
@@ -614,42 +618,36 @@ def _build_campaign_editor(
                     f"· 한 편은 {storage.MAX_VIDEO_MB}MB까지 올릴 수 있습니다.")
 
     async def pick_videos() -> None:
-        web = bool(getattr(page, "web", False))      # 브라우저 실행은 파일 경로가 없어 내용을 받아야 한다
-        files = await ft.FilePicker().pick_files(
-            allow_multiple=True, with_data=web, file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=[e.lstrip(".") for e in sorted(storage.VIDEO_EXTS)],
-        )
-        if not files:
-            return
+        prog = video_upload.UploadProgress(page, "동영상 올리기")
+        frames_new: list[str] = []
+        frame_fail: list[str] = []
+
+        def frame_of(p, rel) -> None:      # 영상마다 대표 장면 1컷 → 블로그 사진
+            frame = ffmpeg_tools.extract_frame(str(storage.abs_path(rel)))
+            if frame:
+                frames_new.append(storage.save_upload(frame, f"{os.path.splitext(p.name)[0]}_장면.jpg"))
+            else:
+                frame_fail.append(f"{p.name}: 대표 장면을 뽑지 못했습니다(FFmpeg 확인). 영상은 쇼츠용으로만 저장했습니다")
+
+        try:
+            picked = await video_upload.pick_videos(page, prog)
+            if not picked:
+                return
+            saved, problems = await asyncio.to_thread(video_upload.save_all, picked, prog, frame_of)
+        finally:
+            prog.close()
+        problems += frame_fail
         card_paths = list((repo.get_campaign(campaign_id) or {}).get("card_photo_paths") or [])
-        videos, frames, problems = 0, 0, []
-        for f in files:
-            src = getattr(f, "path", None)
-            try:
-                if src and os.path.isfile(src):
-                    rel = storage.save_video(f.name, src_path=src)
-                elif f.bytes:
-                    rel = storage.save_video(f.name, raw=f.bytes)
-                else:
-                    problems.append(f"{f.name}: 파일을 읽지 못했습니다")
-                    continue
-            except storage.VideoTooLarge as exc:
-                problems.append(f"{f.name}: {exc} — {storage.MAX_VIDEO_MB}MB를 넘습니다. 필요한 부분만 잘라서 올려 주세요")
-                continue
-            except OSError as exc:
-                problems.append(f"{f.name}: 저장하지 못했습니다({type(exc).__name__})")
-                continue
+        videos = 0
+        for rel in saved:
             if rel not in card_paths:
                 card_paths.append(rel)
                 videos += 1
-            frame = ffmpeg_tools.extract_frame(str(storage.abs_path(rel)))
-            if frame:
-                thumb = storage.save_upload(frame, f"{os.path.splitext(f.name)[0]}_장면.jpg")
-                if thumb not in attached:
-                    attached.append(thumb)
-                    frames += 1
-            else:
-                problems.append(f"{f.name}: 대표 장면을 뽑지 못했습니다(FFmpeg 확인). 영상은 쇼츠용으로만 저장했습니다")
+        frames = 0
+        for thumb in frames_new:
+            if thumb not in attached:
+                attached.append(thumb)
+                frames += 1
         if videos:
             repo.update_campaign(campaign_id, card_photo_paths=card_paths)
         if videos or frames:
@@ -657,7 +655,7 @@ def _build_campaign_editor(
                          + "".join(f" ⚠️ {p}" for p in problems))
         else:
             upload_status.color = "#B3261E"
-            upload_status.value = "새로 올린 동영상이 없습니다. " + " ".join(problems)
+            upload_status.value = "새로 올린 동영상이 없습니다(이미 올린 영상이면 다시 넣지 않습니다). " + " ".join(problems)
             upload_status.update()
 
     def on_pick_videos(e: ft.Event) -> None:

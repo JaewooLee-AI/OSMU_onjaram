@@ -19,6 +19,8 @@ from cards.fonts import display_font, korean_font, text_height, wrap_text_balanc
 from cards.layout_editorial import (
     KICKERS,
     LIST_TYPES,
+    QA_BADGE,
+    TEXT_CARD_TYPES,
     _draw_check_mark,
     _draw_footer_row,
     _lines,
@@ -112,17 +114,23 @@ class ReportLayoutMixin:
         draw.line([x, mid, W - P, mid], fill=k["line"], width=2)
         return y + int(text_height(f) * 1.7)
 
-    def _rp_title(self, draw, ctx, k, y: int, start: int, max_h: int) -> int:
+    def _rp_title(self, draw, ctx, k, y: int, start: int, max_h: int, badge: str = "") -> int:
         W, P = self.WIDTH, self.RP_PAD
-        size = word_fit_size(ctx.slide.lead_headline, int(start * ctx.title_scale), W - 2 * P, 38)
+        tx = P + (QA_BADGE * 2 + 24 if badge else 0)
+        tw = W - P - tx
+        emph, mark = self._emph_style(ctx, k)
+        size = word_fit_size(ctx.slide.lead_headline, int(start * ctx.title_scale), tw, 38)
         while True:
-            end = self._emph_title(draw, ctx, y, size, 38, 3, x=P, width=W - 2 * P, color=k["ink"],
-                                   emph_color=k["accent"], measure=True, line_gap=1.24)
+            end = self._emph_title(draw, ctx, y, size, 38, 3, x=tx, width=tw, color=k["ink"],
+                                   emph_color=emph, mark=mark, measure=True, line_gap=1.24)
             if end - y <= max_h or size <= 38:
                 break
             size -= 3
-        end = self._emph_title(draw, ctx, y, size, 38, 3, x=P, width=W - 2 * P, color=k["ink"],
-                               emph_color=k["accent"], line_gap=1.24)
+        end = self._emph_title(draw, ctx, y, size, 38, 3, x=tx, width=tw, color=k["ink"],
+                               emph_color=emph, mark=mark, line_gap=1.24)
+        if badge:
+            first_h = int(text_height(display_font(size, ctx.slide.lead_headline)) * 1.24)
+            self._fit_badge(draw, P, y + max(0, first_h // 2 - QA_BADGE), badge, k["accent"])
         draw.line([P, end + 22, W - P, end + 22], fill=k["line"], width=2)
         draw.line([P, end + 22, P + 140, end + 22], fill=k.get("gold", T.GOLD), width=3)
         self._ed_note(title=(int(P), int(y), int(W - P), int(end + 26)))
@@ -237,9 +245,24 @@ class ReportLayoutMixin:
         rows = parse_info_rows(ctx.slide.body_content, 7)
         if not rows:
             return
+        row_h = None
+        if not getattr(self, "ED_SHORTS", False) and any(lab for lab, _ in rows):
+            # 카드(내용 맞춤): 라벨 없는 문장은 표 위 안내 글, 표 줄은 남는 높이만큼 키우고 전체를 가운데로
+            leads = [v for lab, v in rows if not lab]
+            rows = [(lab, v) for lab, v in rows if lab]
+            lead_start = int(40 * ctx.body_scale * self._rp_fs)
+            lead_h = self._rp_paragraph(draw, leads, (x0, y0, x1, y0 + int((y1 - y0) * 0.3)), k["text"], lead_start, 26,
+                                        measure=True) if leads else 0
+            gap = 40 if leads else 0
+            row_h = max(70, min(int(176 * self._rp_fs), ((y1 - y0) - lead_h - gap) // len(rows)))
+            top = y0 + max(0, ((y1 - y0) - (lead_h + gap + row_h * len(rows))) // 2)
+            if leads:
+                self._rp_paragraph(draw, leads, (x0, top, x1, top + lead_h + 4), k["text"], lead_start, 26)
+            y0 = top + lead_h + gap
         n = len(rows)
         roomy = n <= 3
-        row_h = min(int((196 if roomy else 148) * self._rp_fs), (y1 - y0) // n)
+        if row_h is None:
+            row_h = min(int((196 if roomy else 148) * self._rp_fs), (y1 - y0) // n)
         y = y0 + min(10, max(0, (y1 - y0) - row_h * n))
         lab_w = 200
         gold = k.get("gold", T.GOLD)
@@ -355,7 +378,11 @@ class ReportLayoutMixin:
         # --- 2) 일반 슬라이드
         y = self._rp_kicker(draw, k, y, KICKERS.get(t, ""))
         title_max_h = int(190 * self._rp_fs) if (is_shorts and t in LIST_TYPES and photo is not None) else int((290 if is_shorts else 240) * self._rp_fs)
-        y = self._rp_title(draw, ctx, k, y, int(T.TYPE["title_report_shorts" if is_shorts else "title_report"] * self._rp_fs), title_max_h) + 28
+        title_start = int(T.TYPE["title_report_shorts" if is_shorts else "title_report"] * self._rp_fs)
+        if not is_shorts and photo is None and t in TEXT_CARD_TYPES + ("qa",):   # 사진 없는 글 카드: 제목을 더 크게
+            title_start, title_max_h = int(title_start * 1.12), int(title_max_h * 1.3)
+        badge = "Q" if (t == "qa" and not is_shorts) else ""
+        y = self._rp_title(draw, ctx, k, y, title_start, title_max_h, badge=badge) + 28
         box = (P, y, W - P, content_bottom)
         body = _lines(ctx.slide.body_content, 6)
         solid = last or t == "call_to_action"
@@ -376,6 +403,9 @@ class ReportLayoutMixin:
                 self._rp_meta(img, draw, ctx, k, box)
         elif t == "event_info":
             self._rp_meta(img, draw, ctx, k, box)
+        elif t == "big_number" and ctx.slide.stat_value and body and not is_shorts:
+            self._fit_big_number(draw, ctx, k, body, box, lambda b: self._rp_rows(draw, ctx, k, body, b, "number"),
+                                 self._rp_fs, k["ink"])
         elif t == "big_number" and ctx.slide.stat_value:
             draw.rounded_rectangle(box, radius=10, fill=k["panel"], outline=k["line"], width=2)
             self._ed_note(stat=tuple(int(v) for v in box))
@@ -397,6 +427,9 @@ class ReportLayoutMixin:
             draw.rounded_rectangle(box, radius=10, fill=k["panel"], outline=k["line"], width=2)
             self._draw_table(draw, header, rows, (box[0] + 20, box[1] + 20, box[2] - 20, box[3] - 20), ctx,
                              start=46, stretch=True, pal=self._table_palette(ctx, k))
+        elif photo is not None and not is_shorts:
+            self._fit_body_photo(img, draw, ctx, k, photo, body, box, self._rp_paragraph,
+                                 lambda im, ph, b, radius: self._rp_photo(im, ph, b, radius=radius), 10, self._rp_fs)
         elif photo is not None:
             p_limit_bottom = foot_top if docked else content_bottom
             text_max = min(int((p_limit_bottom - box[1]) * 0.40), 250)
@@ -417,6 +450,10 @@ class ReportLayoutMixin:
             else:
                 p_bot = max(para_y + 180, content_bottom)
                 self._rp_photo(img, photo, (P, para_y, W - P, p_bot), radius=10, border_color=k.get("gold", k["line"]))
+        elif body and t == "qa" and not is_shorts:
+            self._fit_qa(draw, ctx, k, body, box, self._rp_paragraph, self._rp_fs)
+        elif body and not is_shorts:
+            self._fit_text_body(draw, ctx, k, body, box, self._rp_paragraph, self._rp_fs)
         elif body and box[3] - box[1] >= 140:
             draw.rounded_rectangle(box, radius=10, fill=k["panel"], outline=k["line"], width=2)
             draw.rectangle([box[0], box[1] + 28, box[0] + 8, box[3] - 28], fill=k.get("gold", k["rule"]))

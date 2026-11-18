@@ -104,19 +104,24 @@ def is_video(name: str) -> bool:
     return Path(name or "").suffix.lower() in VIDEO_EXTS
 
 
-def save_video(original_filename: str, src_path: Optional[str] = None, raw: Optional[bytes] = None) -> str:
-    """동영상을 저장하고 rel_path를 돌려준다. 데스크톱은 src_path(파일을 조금씩 읽어 복사 — 메모리에 통째로 올리지 않음),
-    브라우저 실행은 raw. 같은 내용이면 이미 있는 파일을 돌려준다. MAX_VIDEO_MB를 넘으면 VideoTooLarge."""
-    import shutil
+def save_video(original_filename: str, src_path: Optional[str] = None, raw: Optional[bytes] = None, progress=None) -> str:
+    """동영상을 저장하고 rel_path를 돌려준다. src_path(파일을 조금씩 읽어 복사 — 메모리에 통째로 올리지 않음) 또는 raw.
+    같은 내용이면 이미 있는 파일을 돌려준다. MAX_VIDEO_MB를 넘으면 VideoTooLarge.
+    progress(0~1)를 주면 읽기(같은 영상인지 확인, 앞 절반)·복사(뒤 절반) 진행률을 알린다."""
     limit = MAX_VIDEO_MB * 1024 * 1024
     h = hashlib.sha256()
+    step = 4 * 1024 * 1024
+    report = progress or (lambda _f: None)
     if src_path:
         size = os.path.getsize(src_path)
         if size > limit:
             raise VideoTooLarge(f"{size / 1024 / 1024:.0f}MB")
+        done = 0
         with open(src_path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            for chunk in iter(lambda: f.read(step), b""):
                 h.update(chunk)
+                done += len(chunk)
+                report(0.5 * done / max(1, size))
     elif raw is not None:
         size = len(raw)
         if size > limit:
@@ -127,15 +132,22 @@ def save_video(original_filename: str, src_path: Optional[str] = None, raw: Opti
     digest = h.hexdigest()
     existing = repo.find_asset_by_sha256(digest)
     if existing and (ASSETS_DIR / existing["rel_path"]).exists():
+        report(1.0)
         return existing["rel_path"]
     ext = Path(original_filename).suffix.lower() or ".mp4"
     rel_path = f"{datetime.now().strftime('%Y%m')}/{digest[:16]}{ext}"
     target = ASSETS_DIR / rel_path
     target.parent.mkdir(parents=True, exist_ok=True)
     if src_path:
-        shutil.copyfile(src_path, target)
+        done = 0
+        with open(src_path, "rb") as fin, open(target, "wb") as fout:
+            for chunk in iter(lambda: fin.read(step), b""):
+                fout.write(chunk)
+                done += len(chunk)
+                report(0.5 + 0.5 * done / max(1, size))
     else:
         target.write_bytes(raw)
+    report(1.0)
     repo.register_asset(rel_path=rel_path, filename=original_filename, sha256=digest, width=0, height=0, byte_size=size)
     return rel_path
 

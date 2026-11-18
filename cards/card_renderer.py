@@ -533,7 +533,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
 
     def _emph_title(self, draw, ctx: "_Ctx", y: int, start: int, minimum: int, max_lines: int, x: Optional[int] = None,
                     width: Optional[int] = None, color: Optional[str] = None, line_gap: float = 1.22, measure: bool = False,
-                    emph_color: Optional[str] = None, center: bool = False) -> int:
+                    emph_color: Optional[str] = None, center: bool = False, mark: Optional[str] = None) -> int:
         """제목을 그리고 강조어 아래쪽 절반을 형광펜으로 칠함. 강조 표기가 없으면 수치를 자동 강조"""
         W, M = self.WIDTH, self.MARGIN
         x = M if x is None else x
@@ -549,7 +549,7 @@ class CardNewsRendererService(TriLayoutMixin, OnjaramLayoutMixin, EditorialLayou
             return y + len(lines) * int(text_height(font) * line_gap)
         marks = emphasis.spans(text, terms)
         lh = int(text_height(font) * line_gap)
-        hl = tint(ctx.c.accent, 0.35)
+        hl = mark or tint(ctx.c.accent, 0.35)
         x_base = x
         cursor = 0
         for line in lines:

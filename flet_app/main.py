@@ -209,4 +209,6 @@ def main(page: ft.Page) -> None:
 
 
 if __name__ == "__main__":
-    ft.run(main)
+    from flet_app import video_upload
+    # upload_dir: 브라우저 실행에서 큰 동영상을 진행률과 함께 받는 내장 업로드 자리(데스크톱에서는 쓰지 않음)
+    ft.run(main, upload_dir=video_upload.prepare_server())

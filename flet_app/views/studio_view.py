@@ -9,10 +9,14 @@
 """
 from __future__ import annotations
 
+import asyncio
+
 import os
 import shutil
 
 import flet as ft
+
+from flet_app import video_upload
 
 from flet_app.save_dialog import is_web, save_bytes, zip_files
 
@@ -278,44 +282,31 @@ def build(page: ft.Page, state: AppState) -> ft.Control:
                     f"· 한 편은 {storage.MAX_VIDEO_MB}MB까지 올릴 수 있습니다.")
 
     async def pick_videos() -> None:
-        web = bool(getattr(page, "web", False))        # 브라우저 실행은 파일 경로가 없어 내용을 받아야 한다
-        files = await ft.FilePicker().pick_files(
-            allow_multiple=True, with_data=web, file_type=ft.FilePickerFileType.CUSTOM,
-            allowed_extensions=[e.lstrip(".") for e in sorted(storage.VIDEO_EXTS)],
-        )
-        if not files:
-            return
-        current = repo.get_campaign(S["cid"]) or {}
-        paths = list(current.get("card_photo_paths") or [])
-        added, problems = 0, []
-        for f in files:
-            src = getattr(f, "path", None)
-            try:
-                if src and os.path.isfile(src):
-                    rel = storage.save_video(f.name, src_path=src)
-                elif f.bytes:
-                    rel = storage.save_video(f.name, raw=f.bytes)
-                else:
-                    problems.append(f"{f.name}: 파일을 읽지 못했습니다")
-                    continue
-            except storage.VideoTooLarge as exc:
-                problems.append(f"{f.name}: {exc} — {storage.MAX_VIDEO_MB}MB를 넘습니다. 필요한 부분만 잘라서 올려 주세요")
-                continue
-            except OSError as exc:
-                problems.append(f"{f.name}: 저장하지 못했습니다({type(exc).__name__})")
-                continue
-            if rel not in paths:
-                paths.append(rel)
-                added += 1
-        if added:
-            repo.update_campaign(S["cid"], card_photo_paths=paths)
-            reload_state()
-            if S["sb"] is not None:
-                sync_assets(S["sb"], S["campaign"])
-                save_storyboard(S["cid"], S["sb"])
+        prog = video_upload.UploadProgress(page, "쇼츠용 동영상 올리기")
+        try:
+            picked = await video_upload.pick_videos(page, prog)
+            if not picked:
+                return
+            saved, problems = await asyncio.to_thread(video_upload.save_all, picked, prog)
+            added = 0
+            if saved:
+                prog.set("동영상 길이를 읽는 중…", None)
+                current = repo.get_campaign(S["cid"]) or {}
+                paths = list(current.get("card_photo_paths") or [])
+                for rel in saved:
+                    if rel not in paths:
+                        paths.append(rel)
+                        added += 1
+                if added:
+                    repo.update_campaign(S["cid"], card_photo_paths=paths)
+                    await asyncio.to_thread(reload_state)          # 영상 길이(ffprobe)를 읽으므로 화면 스레드 밖에서
+                    if S["sb"] is not None:
+                        save_storyboard(S["cid"], S["sb"])
+        finally:
+            prog.close()
         draw()
         msg = (f"✅ 동영상 {added}편을 올렸습니다. ③ 쇼츠의 대본에서 장면마다 고르거나 [올린 동영상을 장면에 이어 넣기]를 누르세요."
-               if added else "새로 올린 동영상이 없습니다.")
+               if added else "새로 올린 동영상이 없습니다(이미 올린 영상이면 다시 넣지 않습니다).")
         say(msg + "".join(f"\n⚠️ {p}" for p in problems), ok=bool(added) and not problems)
 
     def on_pick_videos(e: ft.Event) -> None:

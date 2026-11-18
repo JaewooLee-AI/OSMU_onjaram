@@ -150,6 +150,18 @@ def body_start_size(lines: List[str]) -> int:
     return 58 if n < 50 else 50 if n < 100 else 44
 
 
+TEXT_CARD_TYPES = ("body", "single", "quote")
+QA_BADGE = 36            # 묻고 답하기 Q·A 동그라미 반지름
+
+
+def photo_shape(photo) -> str:
+    """사진 모양: portrait(세로) | landscape(가로) | square — 카드가 사진 칸 모양을 고를 때 쓴다."""
+    if photo is None:
+        return "none"
+    r = photo.height / max(1, photo.width)
+    return "portrait" if r > 1.12 else "landscape" if r < 0.9 else "square"
+
+
 def _draw_check_mark(draw, cx: float, cy: float, size: float, color: str) -> None:
     """벡터 체크 마크(폰트 의존 없음)."""
     s = size / 24.0
@@ -271,20 +283,24 @@ class EditorialLayoutMixin:
         draw.line([P, rule_y, P + 120, rule_y], fill=k.get("gold", k["accent"]), width=4)
         return rule_y + 24
 
-    def _ed_title(self, draw, ctx, k, y: int, start: int, max_h: int, bar: bool = True) -> int:
+    def _ed_title(self, draw, ctx, k, y: int, start: int, max_h: int, bar: bool = True, badge: str = "") -> int:
         W, P = self.WIDTH, self.ED_PAD
-        tx = P + (18 if bar else 0)
+        tx = P + (QA_BADGE * 2 + 24 if badge else 18 if bar else 0)
         tw = W - P - tx
+        emph, mark = self._emph_style(ctx, k)
         size = word_fit_size(ctx.slide.lead_headline, int(start * ctx.title_scale), tw, 38)
         while True:
             end = self._emph_title(draw, ctx, y, size, 38, 3, x=tx, width=tw, color=k["ink"],
-                                   emph_color=k["accent"], measure=True, line_gap=1.24)
+                                   emph_color=emph, mark=mark, measure=True, line_gap=1.24)
             if end - y <= max_h or size <= 38:
                 break
             size -= 3
         end = self._emph_title(draw, ctx, y, size, 38, 3, x=tx, width=tw, color=k["ink"],
-                               emph_color=k["accent"], line_gap=1.24)
-        if bar and end > y + 8:
+                               emph_color=emph, mark=mark, line_gap=1.24)
+        if badge:
+            first_h = int(text_height(display_font(size, ctx.slide.lead_headline)) * 1.24)
+            self._fit_badge(draw, P, y + max(0, first_h // 2 - QA_BADGE), badge, k["accent"])
+        elif bar and end > y + 8:
             draw.rectangle([P, y + 6, P + 7, end - 4], fill=k.get("gold", k["accent"]))
         self._ed_note(title=(int(P - 2), int(y), int(W - P), int(end + 2)))
         return end
@@ -521,8 +537,12 @@ class EditorialLayoutMixin:
             y1 = qy0 - 16
         return (x0, y0, x1, y1)
 
-    def _ed_info_rows(self, img, draw, ctx, k, box) -> None:
-        """'라벨 값' 줄(안내·문의): 건축 메타데이터 카드(좌측 골드/네이비 스트라이프 + 라벨 태그 + 볼드 값)."""
+    def _ed_info_rows(self, img, draw, ctx, k, box, legacy: bool = False) -> None:
+        """'라벨 값' 줄(안내·문의): 건축 메타데이터 카드(좌측 골드/네이비 스트라이프 + 라벨 태그 + 볼드 값).
+        카드(쇼츠 아님)는 내용 맞춤 표(`_ed_info_table`)로 그린다."""
+        if not legacy and not self.ED_SHORTS:
+            self._ed_info_table(img, draw, ctx, k, box)
+            return
         x0, y0, x1, y1 = self._draw_cta_extras(img, draw, ctx, k, box)
         rows = parse_info_rows(ctx.slide.body_content, 7)
         if not rows:
@@ -680,13 +700,14 @@ class EditorialLayoutMixin:
         gold = k.get("gold", T.GOLD)
         gap = 22
 
-        lead_font = korean_font(int(38 * ctx.body_scale * fs), "medium")
+        card = not getattr(self, "ED_SHORTS", False)
+        lead_font = korean_font(int((44 if card else 38) * ctx.body_scale * fs), "medium")
         lead_lh = int(text_height(lead_font) * 1.46)
         lead_blocks = [wrap_text_balanced(t, lead_font, x1 - x0)[:3] for t in leads[:2]]
         lead_h = sum(len(b) * lead_lh for b in lead_blocks) + (gap if lead_blocks else 0)
         other_h = min(int(104 * fs), 104)
         avail = (y1 - y0) - lead_h - len(others) * (other_h + 12)
-        hero_h = max(170, min(int(440 * fs), avail))
+        hero_h = max(170, min(int((540 if card else 440) * fs), avail))
         if hero_h > avail and others:                                     # 자리가 모자라면 아래 줄을 낮춘다
             other_h = max(64, ((y1 - y0) - lead_h - hero_h) // len(others) - 12)
         total = lead_h + hero_h + len(others) * (other_h + 12)
@@ -712,6 +733,12 @@ class EditorialLayoutMixin:
         addr_f, addr_lines = (None, [])
         if address and hero_h >= 230:
             addr_f, addr_lines = self._fit_lines(address, iw, int(30 * fs), 24, 2, "medium")
+        email = (getattr(ctx.kit, "email", "") or "").strip()
+        if card and email and hero_h >= 300 and not any(email in v for _, v in rows):
+            ef, elines = self._fit_lines(email, iw, int(30 * fs), 24, 1, "medium")
+            if addr_f is None:
+                addr_f = ef
+            addr_lines = addr_lines + elines
         addr_lh = int(text_height(addr_f) * 1.34) if addr_f else 0
         tag_h = int(text_height(tag_f) * 1.5)
         room = hero_h - 56 - tag_h - (len(addr_lines) * addr_lh + 18 if addr_lines else 0)
@@ -752,6 +779,137 @@ class EditorialLayoutMixin:
         from cards.card_renderer import mix
         return {"head": k["solid"], "head_ink": T.IVORY, "row_a": k["bg"], "row_b": mix(k["bg"], k["ink"], 0.06),
                 "line": k["line"], "ink": k["ink"], "text": k["text"], "accent": k.get("gold", k["accent"]) if k["dark"] else k["accent"]}
+
+    # --- 내용 맞춤 배치(카드 전용 — 쇼츠 프레임은 예전 그대로) ----------------------------
+    # 칸 크기를 미리 정하지 않고 내용(글·사진)의 양과 사진 모양에 맞춰 놓는다. 글은 영역에 들어가는 가장 큰 크기로,
+    # 사진은 비율을 지켜(잘리지 않게) 놓고, 남는 높이는 위아래에 나눈다. 쇼츠 '글자 중심' 모양에서 옮긴 원칙.
+    def _emph_style(self, ctx, k):
+        """제목 강조어: 밝은 카드는 형광펜(글자색은 그대로), 어두운 바탕·쇼츠는 예전처럼 강조어 글자색."""
+        from cards.card_renderer import tint
+        if getattr(self, "ED_SHORTS", False) or k["dark"]:
+            return k["accent"], None
+        return None, tint(ctx.c.accent, 0.62)
+
+    def _fit_badge(self, draw, x: int, y: int, letter: str, fill: str) -> None:
+        r = QA_BADGE
+        draw.ellipse([x, y, x + 2 * r, y + 2 * r], fill=fill)
+        draw.text((x + r, y + r), letter, font=display_font(int(r * 1.1), letter), fill=on_color(fill), anchor="mm")
+
+    def _fit_text_body(self, draw, ctx, k, body: List[str], box, para, fs: float) -> None:
+        """사진 없는 글 카드: 상자 없이 짧은 포인트 선 + 큰 본문(영역에 맞는 가장 큰 크기), 위쪽에 조금 더 가깝게."""
+        x0, y0, x1, y1 = box
+        start = int(body_start_size(body) * 1.12 * ctx.body_scale * fs)
+        rule, gap = 8, 34
+        need = para(draw, body, (x0, y0 + rule + gap, x1, y1), k["text"], start, 26, measure=True)
+        top = y0 + max(0, ((y1 - y0) - (rule + gap + need)) * 2 // 5)
+        draw.rounded_rectangle([x0, top, x0 + 120, top + rule], radius=4, fill=k["accent"])
+        para(draw, body, (x0, top + rule + gap, x1, y1), k["text"], start, 26)
+
+    def _fit_qa(self, draw, ctx, k, body: List[str], box, para, fs: float) -> None:
+        """묻고 답하기: (제목 앞 Q는 제목이 그림) 가는 선 아래 A 동그라미 + 큰 답."""
+        x0, y0, x1, y1 = box
+        r = QA_BADGE
+        tx = x0 + 2 * r + 24
+        start = int(body_start_size(body) * ctx.body_scale * fs)
+        need = para(draw, body, (tx, y0 + 34, x1, y1), k["text"], start, 26, measure=True)
+        top = y0 + max(0, ((y1 - y0) - (34 + max(need, 2 * r))) * 2 // 5)
+        draw.line([x0, top, x1, top], fill=k["line"], width=2)
+        a_fill = k.get("gold", k["accent"]) if k["dark"] else k.get("green", k.get("navy"))
+        self._fit_badge(draw, x0, top + 34, "A", a_fill)
+        para(draw, body, (tx, top + 34 + 4, x1, y1), k["text"], start, 26)
+
+    def _fit_body_photo(self, img, draw, ctx, k, photo, body: List[str], box, para, photo_fn, radius: int, fs: float) -> None:
+        """글 + 사진: 세로 사진은 본문 옆 세로 칸, 가로·정사각 사진은 본문 아래 폭 가득. 사진 비율을 지켜 잘리지 않게."""
+        x0, y0, x1, y1 = box
+        bw, bh = x1 - x0, y1 - y0
+        ratio = photo.height / max(1, photo.width)
+        start = int(body_start_size(body) * ctx.body_scale * fs) if body else 0
+        if photo_shape(photo) == "portrait" and body:
+            pw = int(bw * 0.42)
+            ph = int(pw * ratio)
+            if ph > bh:
+                ph, pw = bh, int(bh / ratio)
+            tx1 = x1 - pw - 40
+            need = para(draw, body, (x0, y0, tx1, y1), k["text"], start, 26, measure=True)
+            if need <= bh:                       # 옆 칸에 다 들어가면 나란히(안 들어가면 아래 '폭 가득'으로)
+                row = max(ph, need)
+                top = y0 + max(0, (bh - row) // 2)
+                para(draw, body, (x0, top + max(0, (row - need) // 2), tx1, y1), k["text"], start, 26)
+                py = top + max(0, (row - ph) // 2)
+                photo_fn(img, photo, (x1 - pw, py, x1, py + ph), radius=radius)
+                return
+        gap = 30 if body else 0
+        # 글은 영역의 42%까지 먼저 재고, 사진은 남는 높이를 모두 쓴다(비율 유지 — 넘치면 폭을 줄여 가운데)
+        need = para(draw, body, (x0, y0, x1, y0 + int(bh * 0.42)), k["text"], start, 24, measure=True) if body else 0
+        ph = int(bw * ratio)
+        cap = bh - need - gap
+        pw = bw
+        if ph > cap:
+            ph, pw = cap, int(cap / ratio)
+        top = y0 + max(0, (bh - (need + gap + ph)) // 2)
+        if body:
+            para(draw, body, (x0, top, x1, top + need + 4), k["text"], start, 24)
+        py, px = top + need + gap, x0 + (bw - pw) // 2
+        photo_fn(img, photo, (px, py, px + pw, py + ph), radius=radius)
+
+    def _fit_big_number(self, draw, ctx, k, body: List[str], box, rows_fn, fs: float, color: str) -> None:
+        """큰 숫자 + 본문 항목: 왼쪽 위 큰 숫자·설명, 그 아래 항목 칸(본문이 화면에서 빠지지 않게)."""
+        x0, y0, x1, y1 = box
+        value = ctx.slide.stat_value
+        size = int(220 * fs)
+        while size > 80 and display_font(size, value).getlength(value) > (x1 - x0) * 0.9:
+            size -= 6
+        vf = display_font(size, value)
+        vh = int(text_height(vf) * 1.08)
+        self._ed_note(stat=(int(x0), int(y0), int(x1), int(y0 + vh)))
+        draw.text((x0 - 4, y0), value, font=vf, fill=color)
+        y = y0 + vh + 8
+        if ctx.slide.stat_label:
+            lf, lines = self._fit_lines(ctx.slide.stat_label, x1 - x0, int(42 * fs), 26, 2, "bold")
+            for ln in lines:
+                draw.text((x0, y), ln, font=lf, fill=k["text"])
+                y += int(text_height(lf) * 1.3)
+        rows_fn((x0, y + 30, x1, y1))
+
+    def _ed_info_table(self, img, draw, ctx, k, box) -> None:
+        """안내 카드(카드 전용): 라벨 없는 문장은 위 안내 글, 라벨 줄은 큰 라벨 칸 + 큰 값, 줄 사이 가는 선."""
+        rows = parse_info_rows(ctx.slide.body_content, 7)
+        leads = [v for lab, v in rows if not lab]
+        items = [(lab, v) for lab, v in rows if lab]
+        if not items:
+            self._ed_info_rows(img, draw, ctx, k, box, legacy=True)
+            return
+        x0, y0, x1, y1 = self._draw_cta_extras(img, draw, ctx, k, box)
+        fs = self._ed_fs
+        lead_box_h = int((y1 - y0) * 0.3)
+        lead_start = int(40 * ctx.body_scale * fs)
+        lead_h = self._ed_paragraph(draw, leads, (x0, y0, x1, y0 + lead_box_h), k["text"], lead_start, 26, measure=True) if leads else 0
+        gap = 40 if leads else 0
+        n = len(items)
+        row_h = max(70, min(int(172 * fs), ((y1 - y0) - lead_h - gap) // n))
+        top = y0 + max(0, ((y1 - y0) - (lead_h + gap + row_h * n)) // 2)
+        if leads:
+            self._ed_paragraph(draw, leads, (x0, top, x1, top + lead_h + 4), k["text"], lead_start, 26)
+        y = top + lead_h + gap
+        lab_f = display_font(int(32 * fs), "".join(lab for lab, _ in items))
+        lab_w = int(max(lab_f.getlength(lab) for lab, _ in items)) + 48
+        pill = k.get("green", k["navy"])
+        for i, (lab, value) in enumerate(items):
+            self._ed_note(row=(int(x0), int(y), int(x1), int(y + row_h)))
+            cy = y + row_h // 2
+            half = min(42, (row_h - 20) // 2)
+            draw.rounded_rectangle([x0, cy - half, x0 + lab_w, cy + half], radius=self._r(10), fill=pill)
+            draw.text((x0 + lab_w / 2, cy), lab, font=lab_f, fill=on_color(pill), anchor="mm")
+            vx = x0 + lab_w + 30
+            font, lines = self._fit_lines(value, x1 - vx, int(52 * ctx.body_scale * fs), 26, 2, "bold")
+            lh = int(text_height(font) * 1.3)
+            ly = cy - lh * (len(lines) - 1) / 2
+            for ln in lines:
+                draw.text((vx, ly), ln, font=font, fill=k["ink"], anchor="lm")
+                ly += lh
+            if i < n - 1:
+                draw.line([x0, y + row_h, x1, y + row_h], fill=k["line"], width=2)
+            y += row_h
 
     # --- 쇼츠가 쓰는 칸 위치 -----------------------------------------------------
     def _ed_note(self, photo=None, row=None, title=None, stat=None) -> None:
@@ -823,7 +981,12 @@ class EditorialLayoutMixin:
             self._ed_photo(img, photo, (0, y - 10, W, y - 10 + ph), radius=self._r(0))
             y = y - 10 + ph + 30
         title_max_h = int(190 * self._ed_fs) if (shorts and t in LIST_TYPES and photo is not None) else int((280 if shorts else 230) * self._ed_fs)
-        y = self._ed_title(draw, ctx, k, y, int(T.TYPE["title_shorts" if shorts else "title"] * self._ed_fs), title_max_h) + 22
+        title_start = int(T.TYPE["title_shorts" if shorts else "title"] * self._ed_fs)
+        text_card = not shorts and photo is None and not big_photo and t in TEXT_CARD_TYPES + ("qa",)
+        if text_card:                       # 사진 없는 글 카드: 제목을 더 크게(내용 맞춤 배치)
+            title_start, title_max_h = int(title_start * 1.12), int(title_max_h * 1.3)
+        badge = "Q" if (t == "qa" and not shorts and not big_photo) else ""
+        y = self._ed_title(draw, ctx, k, y, title_start, title_max_h, badge=badge) + (30 if badge else 22)
         box = (P, y, W - P, content_bottom)
         body = _lines(ctx.slide.body_content, 6)
 
@@ -843,6 +1006,9 @@ class EditorialLayoutMixin:
                 self._ed_info_rows(img, draw, ctx, k, box)
         elif t == "event_info":
             self._ed_info_rows(img, draw, ctx, k, box)
+        elif t == "big_number" and ctx.slide.stat_value and body and not shorts:
+            self._fit_big_number(draw, ctx, k, body, box, lambda b: self._ed_rows(img, draw, ctx, k, body, b, "number"),
+                                 self._ed_fs, k["accent"])
         elif t == "big_number" and ctx.slide.stat_value:
             draw.rounded_rectangle(box, radius=self._r(14), fill=k["panel"], outline=k["line"], width=2)
             draw.rectangle([box[0], box[1] + 24, box[0] + 8, box[3] - 24], fill=k.get("gold", k["accent"]))
@@ -867,6 +1033,9 @@ class EditorialLayoutMixin:
         elif big_photo:
             if body and box[3] - box[1] > 60:
                 self._ed_paragraph(draw, body, box, k["text"], int(body_start_size(body) * 0.86 * ctx.body_scale * self._ed_fs), 26)
+        elif photo is not None and not shorts:
+            self._fit_body_photo(img, draw, ctx, k, photo, body, box, self._ed_paragraph,
+                                 lambda im, ph, b, radius: self._ed_photo(im, ph, b, radius=radius), self._r(14), self._ed_fs)
         elif photo is not None:
             # Stitch 본문+사진 계층: 상단 리드 본문 → 하단 대형 건축 프레임 사진 (+ 도킹 네이비 캡션)
             p_limit_bottom = foot_top if docked else content_bottom
@@ -888,6 +1057,10 @@ class EditorialLayoutMixin:
             else:
                 p_bot = max(para_y + 180, content_bottom)
                 self._ed_photo(img, photo, (P, para_y, W - P, p_bot), radius=self._r(14), border_color=k.get("gold", k["line"]))
+        elif body and t == "qa" and not shorts:
+            self._fit_qa(draw, ctx, k, body, box, self._ed_paragraph, self._ed_fs)
+        elif body and not shorts:
+            self._fit_text_body(draw, ctx, k, body, box, self._ed_paragraph, self._ed_fs)
         elif body and box[3] - box[1] >= 140:
             # 글 카드: 건축 인용·브리핑 패널 + 좌측 골드/버건디 세로 바
             draw.rounded_rectangle(box, radius=self._r(14), fill=k["panel"], outline=k["line"], width=2)

@@ -2,6 +2,7 @@
 합성한 쇼츠에 원래 소리가 섞이지 않는지, 데이터 옮기기에서 원본 영상 제외."""
 import asyncio
 import json
+import os
 import subprocess
 
 import pytest
@@ -487,3 +488,16 @@ def test_full_layout_moves_landscape_video_up_and_shows_card_text_below(tmp_path
     assert white > 600                                                                                # 영상 아래에 요약·본문 글자
     cap_y = 1920 - shorts_ed.FULL_BOTTOM_SAFE - shorts_ed.CAPTION_H
     assert f.crop((300, cap_y + 60, 780, cap_y + shorts_ed.CAPTION_H - 60)).convert("L").getextrema()[1] > 200   # 내용이 짧으면 자막도 함께
+
+
+def test_save_video_reports_progress_and_dedupes(tmp_path):
+    """큰 영상 저장 진행률: 0→1로 늘고, 같은 영상은 복사 없이 바로 1.0(진행 창이 멈춘 듯 보이지 않게)."""
+
+    src = tmp_path / "clip.mp4"
+    src.write_bytes(os.urandom(9 * 1024 * 1024))
+    seen = []
+    rel = storage.save_video("clip.mp4", src_path=str(src), progress=seen.append)
+    assert storage.abs_path(rel).read_bytes() == src.read_bytes()
+    assert seen == sorted(seen) and seen[-1] == 1.0 and any(0 < v < 0.5 for v in seen) and any(0.5 < v < 1 for v in seen)
+    again = []
+    assert storage.save_video("clip.mp4", src_path=str(src), progress=again.append) == rel and again[-1] == 1.0
