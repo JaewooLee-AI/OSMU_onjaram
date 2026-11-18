@@ -30,8 +30,11 @@ def art(name, c1, c2, c3):
         return storage.save_upload(f.read(), f"{name}.jpg")
 
 
-with open("/tmp/edsh/stitch_trust.png", "rb") as f:   # Stitch가 만든 AI 이미지(실제 사진 아님)
-    room = storage.save_upload(f.read(), "ai_room.jpg")
+if os.path.isfile("/tmp/edsh/stitch_trust.png"):       # Stitch가 만든 AI 이미지(실제 사진 아님)
+    with open("/tmp/edsh/stitch_trust.png", "rb") as f:
+        room = storage.save_upload(f.read(), "ai_room.jpg")
+else:                                                   # 없으면 합성 그림
+    room = art("room", "#EFE7DA", "#C9B79C", "#7A9E87")
 calm = art("calm", "#DCE7DE", "#A9C4B0", "#E07A5F")
 navy = art("navy", "#E3E8EF", "#9DB0C8", "#4A7C59")
 

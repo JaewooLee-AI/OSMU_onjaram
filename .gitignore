@@ -38,3 +38,6 @@ info/
 # 음원은 앱 설정 → 📣 생성 채널 → 🎵 쇼츠 배경 음악에서 PC마다 추가합니다(데이터 폴더 music/).
 cards/music/*
 !cards/music/LICENSES.md
+
+# 설명서 빌드 중간 그림(캡처에서 다시 만듦)
+docs/manual/build/img/
